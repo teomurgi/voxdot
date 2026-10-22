@@ -2,6 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Godot 4.7.2](https://img.shields.io/badge/godot-4.7.2-478cbf)](https://godotengine.org)
+[![Tests](https://github.com/teomurgi/voxdot/actions/workflows/tests.yml/badge.svg)](https://github.com/teomurgi/voxdot/actions/workflows/tests.yml)
 
 A standalone voxel model editor built on [Godot](https://godotengine.org) 4.7. Sculpt blocky voxel models,
 save them as Godot `.tres` resources, and drop them into any Godot game.
