@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Voxdot
+Comment=Voxel model editor
+Exec=voxdot %f
+Icon=voxdot
+Terminal=false
+Categories=Graphics;3DGraphics;
+StartupWMClass=Voxdot
