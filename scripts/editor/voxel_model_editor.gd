@@ -85,7 +85,10 @@ var _syncing_ui: bool = false
 func _ready() -> void:
 	_build_world()
 	_build_ui()
-	doc.changed.connect(func() -> void: _mesh_dirty = true)
+	doc.changed.connect(func() -> void:
+		_mesh_dirty = true
+		if height_lock:
+			_update_layer_plane())
 	doc.meta_changed.connect(_on_meta_changed)
 	doc.history_changed.connect(_refresh_history_buttons)
 	_on_meta_changed()
@@ -196,8 +199,11 @@ func _build_world() -> void:
 
 	_mirror_x_mi = _make_mirror_plane("MirrorX")
 	_mirror_z_mi = _make_mirror_plane("MirrorZ")
-	_layer_mi = _make_mirror_plane("WorkLayer")
-	((_layer_mi.mesh as QuadMesh).material as StandardMaterial3D).albedo_color = Color(1.0, 0.75, 0.25, 0.14)
+	_layer_mi = MeshInstance3D.new()
+	_layer_mi.name = "WorkLayer"
+	_layer_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_layer_mi.visible = false
+	add_child(_layer_mi)
 
 
 func _make_mirror_plane(node_name: String) -> MeshInstance3D:
@@ -284,12 +290,63 @@ func _rebuild_grid() -> void:
 	_update_layer_plane()
 
 
+## Draws the work layer as a golden slice grid over the model's footprint.
+## Lines instead of a filled sheet, so what is underneath stays readable.
 func _update_layer_plane() -> void:
 	var b: Vector3i = doc.bounds
 	work_layer = clampi(work_layer, 0, b.y - 1)
-	_layer_mi.position = Vector3(b.x * 0.5, float(work_layer) + 0.002, b.z * 0.5)
-	_layer_mi.rotation_degrees = Vector3(-90, 0, 0)
-	(_layer_mi.mesh as QuadMesh).size = Vector2(b.x, b.z)
+	var lo := Vector3(INF, INF, INF)
+	var hi := Vector3(-INF, -INF, -INF)
+	for p: Vector3i in doc.grid:
+		lo = lo.min(Vector3(p))
+		hi = hi.max(Vector3(p) + Vector3.ONE)
+	if doc.grid.is_empty():
+		lo = Vector3.ZERO
+		hi = Vector3(b)
+	var x0: int = floori(lo.x)
+	var x1: int = ceili(hi.x)
+	var z0: int = floori(lo.z)
+	var z1: int = ceili(hi.z)
+	var y: float = float(work_layer) + 0.002
+	var minor := Color(1.0, 0.72, 0.25, 0.30)
+	var major := Color(1.0, 0.86, 0.48, 0.65)
+	var verts := PackedVector3Array()
+	var cols := PackedColorArray()
+	for x in range(x0, x1 + 1):
+		var c: Color = major if x % 8 == 0 else minor
+		verts.append(Vector3(x, y, z0))
+		verts.append(Vector3(x, y, z1))
+		cols.append(c)
+		cols.append(c)
+	for z in range(z0, z1 + 1):
+		var c: Color = major if z % 8 == 0 else minor
+		verts.append(Vector3(x0, y, z))
+		verts.append(Vector3(x1, y, z))
+		cols.append(c)
+		cols.append(c)
+	var border := Color(1.0, 0.78, 0.22, 0.95)
+	for pair: Array in [
+		[Vector3(x0, y, z0), Vector3(x1, y, z0)],
+		[Vector3(x0, y, z1), Vector3(x1, y, z1)],
+		[Vector3(x0, y, z0), Vector3(x0, y, z1)],
+		[Vector3(x1, y, z0), Vector3(x1, y, z1)],
+	]:
+		verts.append(pair[0])
+		verts.append(pair[1])
+		cols.append(border)
+		cols.append(border)
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_COLOR] = cols
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arrays)
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.vertex_color_use_as_albedo = true
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mesh.surface_set_material(0, mat)
+	_layer_mi.mesh = mesh
 	_layer_mi.visible = height_lock
 
 
