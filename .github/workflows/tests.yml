@@ -1,0 +1,34 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Headless tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Godot
+        uses: barichello/godot-ci@v1.3.0
+        with:
+          version: 4.7.2
+          include-templates: false
+          use-double: false
+
+      - name: Import the project
+        run: godot --headless --path . --import
+
+      # Each suite exits non-zero when a check fails.
+      - name: VoxelDocument
+        run: godot --headless --path . -s tests/voxel_document_test.gd
+
+      - name: VoxelModelEditor
+        run: godot --headless --path . -s tests/voxel_editor_test.gd
+
+      - name: Editor input handling
+        run: godot --headless --path . -s tests/voxel_editor_input_test.gd

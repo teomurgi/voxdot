@@ -1,5 +1,8 @@
 # Voxdot
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Godot 4.7.2](https://img.shields.io/badge/godot-4.7.2-478cbf)](https://godotengine.org)
+
 A standalone voxel model editor built on [Godot](https://godotengine.org) 4.7. Sculpt blocky voxel models,
 save them as Godot `.tres` resources, and drop them into any Godot game.
 
@@ -67,3 +70,15 @@ scripts/runtime/  VoxelModelInstance (drop-in node for games)
 scenes/voxdot.tscn   main scene
 packaging/        launcher script, .desktop file
 ```
+
+## Contributing
+
+Bug reports and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) first: it covers the
+code layout, the style rules, how to add a tool, and the one file you must not move
+(`scripts/editor/voxel_model.gd`, because saved models reference it by path).
+
+## License
+
+MIT — see [LICENSE](LICENSE). The `VoxelModel` format is intentionally simple and stable so that models
+saved here stay loadable in other Godot projects.
+
