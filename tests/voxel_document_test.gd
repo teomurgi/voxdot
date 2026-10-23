@@ -20,6 +20,7 @@ func _initialize() -> void:
 	_test_mirror()
 	_test_flood_box_bounds()
 	_test_model_roundtrip()
+	_test_lights()
 	_test_raycast()
 	print("voxel_document_test: ", "PASS" if _fails == 0 else "%d FAILED" % _fails)
 	quit(1 if _fails > 0 else 0)
@@ -91,7 +92,7 @@ func _test_flood_box_bounds() -> void:
 	_check(d.bounds == Vector3i(32, 32, 32), "bounds unchanged after refusal")
 	d.erase_cells([Vector3i(10, 0, 0)] as Array[Vector3i])
 	_check(d.resize_bounds(Vector3i(8, 8, 8)) and d.bounds == Vector3i(8, 8, 8), "shrink allowed when empty")
-	_check(d.resize_bounds(Vector3i(500, 2, 8)) and d.bounds == Vector3i(64, 4, 8), "bounds clamp to limits")
+	_check(d.resize_bounds(Vector3i(2000, 2, 8)) and d.bounds == Vector3i(1024, 4, 8), "bounds clamp to limits")
 
 
 func _test_model_roundtrip() -> void:
@@ -129,6 +130,59 @@ func _test_model_roundtrip() -> void:
 	_check(f.load_file(abs_path) == OK and f.grid == d.grid, "load from absolute path outside the project")
 	DirAccess.remove_absolute(abs_path)
 	DirAccess.remove_absolute(abs_dir)
+
+
+func _test_lights() -> void:
+	print("lights")
+	var d := VoxelDocument.new()
+	_check(d.lights.is_empty(), "new document has no lights")
+	var id: int = d.add_light({"position": Vector3(4, 5, 6), "color": Color("ffcc88"), "energy": 2.0, "range": 12.0})
+	_check(id > 0 and d.lights.size() == 1, "add_light returns a positive id")
+	var l: Dictionary = d.lights[id]
+	_check(l["position"] == Vector3(4, 5, 6) and (l["color"] as Color).is_equal_approx(Color("ffcc88")), "light stores position and color")
+	_check(l["energy"] == 2.0 and l["range"] == 12.0 and l["shadows"] == true, "light stores energy, range, shadows")
+	_check(d.dirty, "adding a light marks the document dirty")
+	_check(d.add_light({"position": Vector3(-1, 0, 0)}) == -1, "out-of-bounds light refused")
+	_check(d.update_light(id, {"position": Vector3(7, 8, 9), "energy": 3.0}), "update_light changes properties")
+	_check((d.lights[id]["position"] as Vector3) == Vector3(7, 8, 9), "position moved")
+	_check(not d.update_light(id, {"position": Vector3(500, 0, 0)}), "moving out of bounds refused")
+	# One drag = one undo step even though update_light ran repeatedly.
+	d.begin_stroke()
+	d.update_light(id, {"position": Vector3(10, 1, 1)})
+	d.update_light(id, {"position": Vector3(11, 1, 1)})
+	d.end_stroke()
+	_check(d.undo(), "light drag is undoable")
+	_check((d.lights[id]["position"] as Vector3) == Vector3(7, 8, 9), "undo restores the pre-drag position")
+	_check(d.redo() and (d.lights[id]["position"] as Vector3) == Vector3(11, 1, 1), "redo replays the drag")
+	var id2: int = d.add_light({"position": Vector3(1, 1, 1)})
+	_check(id2 > id, "ids increase")
+	_check(d.remove_light(id2) and not d.lights.has(id2), "remove_light deletes")
+	d.undo()
+	_check(d.lights.has(id2), "undo restores a removed light")
+	d.redo()
+	# Save/open round-trip keeps every light property and the sun setup.
+	var path := "user://voxel_document_lights.tres"
+	d.set_sun({"energy": 1.6, "yaw": 120.0, "pitch": -35.0, "color": Color("ffd9a0"), "shadows": false})
+	_check(d.dirty, "changing the sun marks the document dirty")
+	_check(d.save_file(path) == OK, "save with lights")
+	var e := VoxelDocument.new()
+	_check(e.load_file(path) == OK and e.lights.size() == d.lights.size(), "open restores lights")
+	_check((e.lights[id]["position"] as Vector3) == Vector3(11, 1, 1) and e.lights[id]["energy"] == 3.0, "light properties survive the round-trip")
+	_check(is_equal_approx(e.sun_energy, 1.6) and is_equal_approx(e.sun_yaw, 120.0) and is_equal_approx(e.sun_pitch, -35.0),
+			"sun energy and angles survive the round-trip")
+	_check((e.sun_color as Color).is_equal_approx(Color("ffd9a0")) and e.sun_shadows == false, "sun color and shadows survive the round-trip")
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	# A model without light data still opens cleanly.
+	var legacy := VoxelModel.from_grid({Vector3i(1, 0, 1): Color.RED})
+	legacy.lights = PackedFloat32Array()
+	_check(e.load_model(legacy) == 0 and e.lights.is_empty(), "legacy model without lights loads")
+	_check(is_equal_approx(e.sun_energy, VoxelDocument.DEFAULT_SUN_ENERGY) and is_equal_approx(e.sun_pitch, VoxelDocument.DEFAULT_SUN_PITCH),
+			"legacy model gets the default sun")
+	# Bounds shrink refuses when a light would fall outside.
+	var id3: int = e.add_light({"position": Vector3(20, 1, 1)})
+	_check(not e.resize_bounds(Vector3i(4, 4, 4)), "shrink below a light refused")
+	e.remove_light(id3)
+	_check(e.resize_bounds(Vector3i(8, 8, 8)), "shrink allowed once lights are gone")
 
 
 func _test_raycast() -> void:

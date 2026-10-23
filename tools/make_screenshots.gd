@@ -52,6 +52,7 @@ func _run() -> void:
 	await _shot_editor()
 	await _shot_height_lock()
 	await _shot_box_tool()
+	await _shot_lighting()
 	print("screenshots written to ", ProjectSettings.globalize_path(OUT_DIR))
 	quit()
 
@@ -65,11 +66,15 @@ func _grab(file_name: String) -> void:
 	print("  ", path, "  ", img.get_size())
 
 
-## Sets the document contents and frames the camera on the result.
+## Sets the document contents and frames the camera on the result. Assigning
+## `doc.grid` directly does not emit `last_touched`, so mark the document as
+## replaced to route the change through `_on_doc_reset()`, which rebuilds the
+## chunk records (the chunk renderer keeps its own cell index).
 func _load_model(grid: Dictionary, voxel_size: float = 0.0625) -> void:
 	_ed.doc.reset()
 	_ed.doc.set_voxel_size(voxel_size)
 	_ed.doc.grid = grid
+	_ed._doc_replaced = true
 	_ed.doc.changed.emit()
 	_ed._rebuild_mesh()
 
@@ -123,6 +128,53 @@ func _shot_box_tool() -> void:
 	_frame(Vector3(13, 6, 13), 37.0)
 	await _grab("03-box-tool.png")
 	_ed._stroking = false
+
+
+## --- Shot 4: point lights + the directional sun ---
+
+func _shot_lighting() -> void:
+	_load_model(_build_castle())
+	_ed._set_height_lock(false)
+	_ed._set_layer(0)
+	_ed._set_tool(VoxelModelEditor.Tool.LIGHT_EDIT)
+	# Dusk sun: low, warm, long shadows.
+	_ed.doc.set_sun({"energy": 0.45, "yaw": 118.0, "pitch": -16.0, "color": Color("ffb27a"), "shadows": true})
+	# Braziers by the gate plus two warm lanterns on the path.
+	var ids: Array[int] = []
+	ids.append(_ed.add_point_light(Vector3(9.5, 3.5, 22.5), Color("ff9a3c"), 4.0, 16.0))
+	ids.append(_ed.add_point_light(Vector3(16.5, 3.5, 22.5), Color("ff9a3c"), 4.0, 16.0))
+	ids.append(_ed.add_point_light(Vector3(12.5, 3.0, 12.5), Color("ffd28a"), 2.5, 12.0))
+	ids.append(_ed.add_point_light(Vector3(13.5, 3.0, 12.5), Color("ffd28a"), 2.5, 12.0))
+	_ed._select_light(ids[0])
+	# Show the lighting inspector, but fold the drawing sections so it fits.
+	_set_section("Tool", false)
+	_set_section("Color", false)
+	_set_section("Lighting", true)
+	_ed._hover = {"valid": false}
+	_ed._update_ghost()
+	_ed._yaw = deg_to_rad(42.0)
+	_ed._pitch = deg_to_rad(-20.0)
+	_frame(Vector3(13, 6, 13), 40.0)
+	_ed.light_rig.update_handle_scales(_ed.camera)
+	await _grab("04-lighting.png")
+
+
+## Expands/collapses a side-panel section by name.
+func _set_section(name: String, expanded: bool) -> void:
+	var headers: Array[Button] = []
+	_collect_headers(_ed.get_node("UI"), headers)
+	for h: Button in headers:
+		if h.text.contains(name):
+			var is_open: bool = h.text.begins_with("▼")
+			if is_open != expanded:
+				h.pressed.emit()
+
+
+func _collect_headers(node: Node, out: Array[Button]) -> void:
+	for child in node.get_children():
+		if child is Button and (child.text.begins_with("▼") or child.text.begins_with("▶")):
+			out.append(child)
+		_collect_headers(child, out)
 
 
 ## Points the camera at a spot from the current yaw/pitch.

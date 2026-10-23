@@ -36,6 +36,7 @@ func rebuild() -> void:
 	mi.name = "Mesh"
 	mi.mesh = model.build_mesh()
 	add_child(mi)
+	model.build_lights(self)
 	if not with_collision or Engine.is_editor_hint():
 		return
 	if mi.mesh == null or mi.mesh.get_surface_count() == 0:

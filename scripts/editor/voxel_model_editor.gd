@@ -10,9 +10,9 @@ extends Node3D
 ## 1-7 tools | H height lock, [ ] layer down/up | X/Z mirror | Q/E rotate view | P ortho | G grid | F reframe
 ## Ctrl+Z / Ctrl+Shift+Z undo/redo | Ctrl+N/O/S new/open/save (+Shift = save as)
 
-enum Tool { PLACE, ERASE, PAINT, PICK, BOX, BOX_ERASE, FILL }
+enum Tool { PLACE, ERASE, PAINT, PICK, BOX, BOX_ERASE, FILL, LIGHT_PLACE, LIGHT_EDIT }
 
-const TOOL_NAMES: Array[String] = ["Place", "Erase", "Paint", "Pick", "Box", "Box Erase", "Fill"]
+const TOOL_NAMES: Array[String] = ["Place", "Erase", "Paint", "Pick", "Box", "Box Erase", "Fill", "Light", "Edit Light"]
 const TOOL_HINTS: Array[String] = [
 	"Click/drag to add voxels",
 	"Click/drag to remove voxels",
@@ -21,6 +21,8 @@ const TOOL_HINTS: Array[String] = [
 	"Drag a rectangle; Box depth extrudes it",
 	"Drag a rectangle into the model; Box depth sets how deep",
 	"Recolor all connected voxels of the same color",
+	"Click to add a point light; drag on the work plane to position it",
+	"Click a light handle to select it; drag to move it; Delete removes it",
 ]
 const APP_TITLE: String = "Voxdot"
 
@@ -33,12 +35,18 @@ var height_lock: bool = false
 var work_layer: int = 0
 
 var camera: Camera3D
+var world_environment: Environment
+var sun: DirectionalLight3D
+var selected_light_id: int = -1
+var light_rig: VoxelLightRig
+var _drag_light_id: int = -1
+var _light_edit_active: bool = false
+var _drag_light_plane := Plane()
 var _yaw: float = deg_to_rad(45.0)
 var _pitch: float = deg_to_rad(-35.264)
 var _distance: float = 60.0
 var _focus: Vector3 = Vector3(16, 6, 16)
 
-var _model_mi: MeshInstance3D
 var _ghost: MeshInstance3D
 var _ghost_mat: StandardMaterial3D
 var _grid_mi: MeshInstance3D
@@ -46,6 +54,29 @@ var _mirror_x_mi: MeshInstance3D
 var _mirror_z_mi: MeshInstance3D
 var _layer_mi: MeshInstance3D
 var _mesh_dirty: bool = true
+# Chunked rendering: the world is split into CHUNK_SIZE^3 regions, each with
+# its own MeshInstance3D, so a batch edit only rebuilds the chunks it touched.
+# render_horizon additionally caps which chunks exist at all: only chunks
+# within that horizontal distance of the camera are meshed, so raising it
+# reveals progressively farther parts of the model. 0 means unlimited.
+# The full grid is always kept and saved.
+const CHUNK_SIZE: int = 64
+const UNLIMITED_HORIZON: int = 1 << 30
+var render_horizon: int = UNLIMITED_HORIZON
+var _chunks: Dictionary = {}          # Vector2i(xz chunk) -> Dictionary(y -> {mi, dirty, cooldown})
+# Chunk index over the raw grid, independent of what is currently meshed:
+# _grid_chunks: chunk key -> true (chunk contains at least one voxel),
+# _chunk_cells: chunk key -> Array[Vector3i] (cells ever written there; build
+# filters through doc.grid, so stale keys from erases are harmless).
+var _grid_chunks: Dictionary = {}
+var _chunk_cells: Dictionary = {}
+var _last_horizon_camera: Vector3 = Vector3(INF, 0, INF)
+var _frame: int = 0
+var _last_change_frame: int = -1000
+var _doc_replaced: bool = false
+const CHUNK_COOLDOWN: int = 48
+const NAVIGATION_SPEED: float = 24.0
+const NAVIGATION_FAST_MULTIPLIER: float = 4.0
 
 var _hover: Dictionary = {"valid": false}
 var _stroking: bool = false
@@ -57,6 +88,7 @@ var _plane_normal: Vector3i = Vector3i.UP
 var _stroke_start: Vector3i = Vector3i.ZERO
 var _last_cell: Vector3i = Vector3i(-1, -1, -1)
 var _box_end: Vector3i = Vector3i.ZERO
+var _stroke_mouse_driven: bool = false
 
 # UI
 var _tool_buttons: Array[Button] = []
@@ -73,10 +105,28 @@ var _status_label: Label
 var _cursor_label: Label
 var _lock_check: CheckButton
 var _layer_spin: SpinBox
+var _horizon_spin: SpinBox
 var _message_label: Label
 var _hint_label: Label
 var _file_dialog: FileDialog
+var _screenshot_dialog: FileDialog
 var _confirm_dialog: ConfirmationDialog
+var _light_color_button: ColorPickerButton
+var _light_position_spins: Array[SpinBox] = []
+var _light_energy_spin: SpinBox
+var _light_range_spin: SpinBox
+var _light_shadows_check: CheckButton
+var _light_handles_check: CheckButton
+var _light_selection_label: Label
+var _light_delete_button: Button
+var _sun_energy_spin: SpinBox
+var _sun_yaw_spin: SpinBox
+var _sun_pitch_spin: SpinBox
+var _sun_color_button: ColorPickerButton
+var _sun_shadows_check: CheckButton
+var _mcp: MCPServer
+var _ui_layer: CanvasLayer
+var _capturing_screenshot: bool = false
 var _pending_open: bool = false
 var _pending_action: Callable = Callable()
 var _syncing_ui: bool = false
@@ -86,6 +136,17 @@ func _ready() -> void:
 	_build_world()
 	_build_ui()
 	doc.changed.connect(func() -> void:
+		if _doc_replaced:
+			_doc_replaced = false
+			_on_doc_reset()
+		else:
+			for p: Vector3i in doc.last_touched:
+				_index_cell(p)
+				_touch_chunk(p.x, p.z)
+		_sync_light_nodes()
+		doc.last_touched.clear()
+		doc.last_touched_lights.clear()
+		_last_change_frame = _frame
 		_mesh_dirty = true
 		if height_lock:
 			_update_layer_plane())
@@ -100,6 +161,11 @@ func _ready() -> void:
 	# Closing the window must go through the unsaved-changes prompt.
 	get_tree().set_auto_accept_quit(false)
 	get_window().files_dropped.connect(_on_files_dropped)
+	if MCPServer.enabled_from_env():
+		_mcp = MCPServer.new()
+		_mcp.editor = self
+		add_child(_mcp)
+		_mcp.start()
 	var arg: String = cli_model_path(OS.get_cmdline_user_args() + OS.get_cmdline_args())
 	if arg != "":
 		_open_path(arg)
@@ -138,11 +204,15 @@ func _on_files_dropped(files: PackedStringArray) -> void:
 
 func _open_path(chosen: String) -> void:
 	var p: String = ProjectSettings.localize_path(chosen)
+	# Set this BEFORE load_file so the changed signal emitted mid-load triggers
+	# _on_doc_reset(), which rebuilds the chunk records for the new grid.
+	_doc_replaced = true
 	var err: Error = doc.load_file(p)
 	if err == OK:
 		frame_model()
 		_say("Opened " + p)
 	else:
+		_doc_replaced = false
 		_say("Open failed (%s): %s" % [error_string(err), p])
 
 
@@ -154,18 +224,25 @@ func _build_world() -> void:
 	env.background_color = Color(0.11, 0.12, 0.15)
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	env.ambient_light_color = Color(0.55, 0.57, 0.65)
-	env.ambient_light_energy = 0.75
+	# Keep a small constant ambient floor so unlit faces never go pitch black;
+	# the scene's mood comes from the directional sun (see _apply_environment).
+	env.ambient_light_energy = 0.08
 	var we := WorldEnvironment.new()
 	we.name = "WorldEnvironment"
 	we.environment = env
+	world_environment = env
 	add_child(we)
 
 	var sun := DirectionalLight3D.new()
 	sun.name = "Sun"
-	sun.rotation_degrees = Vector3(-50, 35, 0)
-	sun.light_energy = 1.0
+	sun.rotation_degrees = Vector3(VoxelDocument.DEFAULT_SUN_PITCH, VoxelDocument.DEFAULT_SUN_YAW, 0.0)
+	sun.light_energy = VoxelDocument.DEFAULT_SUN_ENERGY
 	sun.shadow_enabled = true
 	add_child(sun)
+	self.sun = sun
+	light_rig = VoxelLightRig.new()
+	light_rig.name = "VoxelLights"
+	add_child(light_rig)
 
 	camera = Camera3D.new()
 	camera.name = "Camera3D"
@@ -173,10 +250,6 @@ func _build_world() -> void:
 	camera.near = 0.05
 	camera.current = true
 	add_child(camera)
-
-	_model_mi = MeshInstance3D.new()
-	_model_mi.name = "Model"
-	add_child(_model_mi)
 
 	_ghost_mat = StandardMaterial3D.new()
 	_ghost_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -352,7 +425,203 @@ func _update_layer_plane() -> void:
 
 func _rebuild_mesh() -> void:
 	_mesh_dirty = false
-	_model_mi.mesh = VoxelMeshBuilder.build_mesh(doc.grid, 1.0)
+	_mark_all_chunks_dirty()
+	_update_dirty_chunks()
+
+
+## Chunk key for a world cell.
+func _chunk_key(p: Vector3i) -> Vector2i:
+	return Vector2i(p.x / CHUNK_SIZE, p.z / CHUNK_SIZE)
+
+
+## Marks the chunk containing (x, z) dirty; creates the chunk record if new.
+## Chunks entirely beyond the render horizon (measured from the camera focus)
+## are skipped entirely (0 = all).
+func _touch_chunk(x: int, z: int) -> void:
+	var key := _chunk_key(Vector3i(x, 0, z))
+	if not _chunk_within_horizon(key):
+		return # chunk center is beyond the horizon
+	var col: Dictionary = _chunks.get_or_add(key, {})
+	var rec: Dictionary = col.get_or_add(0, {"mi": null, "dirty": true, "cooldown": -100000})
+	rec["dirty"] = true
+	col[0] = rec
+	_mesh_dirty = true
+
+
+## True when the chunk is within the render horizon of the camera. The
+## distance is horizontal (chunks are full-height columns) and measured from
+## the camera, so raising the horizon always reveals farther chunks and never
+## pops in parts that were already closer to the viewer. Unlimited always
+## passes.
+func _chunk_within_horizon(key: Vector2i) -> bool:
+	if render_horizon >= UNLIMITED_HORIZON:
+		return true
+	var center := Vector2(key.x * CHUNK_SIZE + CHUNK_SIZE * 0.5,
+		key.y * CHUNK_SIZE + CHUNK_SIZE * 0.5)
+	var cam := Vector2(camera.global_position.x, camera.global_position.z)
+	return center.distance_to(cam) <= float(render_horizon)
+
+
+## Adds a cell to the chunk-cell index so rebuilds never rescan the full grid.
+## Erases need no index update: builds filter through doc.grid.
+func _index_cell(p: Vector3i) -> void:
+	var key := _chunk_key(p)
+	if not _grid_chunks.has(key):
+		_grid_chunks[key] = true
+		_chunk_cells[key] = [] as Array[Vector3i]
+	var cells: Array[Vector3i] = _chunk_cells[key]
+	if not cells.has(p):
+		cells.append(p)
+
+
+func _mark_all_chunks_dirty() -> void:
+	for key: Vector2i in _chunks:
+		for cy: int in _chunks[key]:
+			_chunks[key][cy]["dirty"] = true
+	_mesh_dirty = true
+
+
+## Rebuilds dirty chunk meshes. During heavy streaming (recent writes) each
+## chunk rebuilds at most once per CHUNK_COOLDOWN frames so the editor keeps
+## rendering; idle edits rebuild immediately.
+func _update_dirty_chunks() -> void:
+	var streaming: bool = _frame - _last_change_frame < 30
+	var rebuilt_any: bool = false
+	for key: Vector2i in _chunks:
+		var col: Dictionary = _chunks[key]
+		for cy: int in col:
+			var rec: Dictionary = col[cy]
+			if not rec["dirty"]:
+				continue
+			# While batches stream in, rebuild each chunk at most once per
+			# cooldown window so the editor keeps rendering; never built yet
+			# (mi == null) builds immediately.
+			var mi: MeshInstance3D = rec["mi"]
+			if mi != null and streaming and _frame - int(rec["cooldown"]) < CHUNK_COOLDOWN:
+				continue
+			_build_chunk_mesh(key, col, cy, rec)
+			rebuilt_any = true
+	if rebuilt_any:
+		_update_status()
+	if not streaming:
+		_mesh_dirty = false
+	else:
+		for key: Vector2i in _chunks:
+			for cy: int in _chunks[key]:
+				if _chunks[key][cy]["dirty"]:
+					return
+		_mesh_dirty = false
+
+
+## Extracts the chunk's voxels from the chunk-cell index (no full-grid scan)
+## and meshes them. Stale cells (erased since indexing) are simply absent from
+## doc.grid, so they are skipped naturally.
+func _build_chunk_mesh(key: Vector2i, col: Dictionary, _cy: int, rec: Dictionary) -> void:
+	rec["dirty"] = false
+	rec["cooldown"] = _frame
+	var cells := {}
+	for p: Vector3i in (_chunk_cells.get(key, []) as Array):
+		if doc.grid.has(p):
+			cells[p] = doc.grid[p]
+	var mesh: ArrayMesh = VoxelMeshBuilder.build_mesh(cells, 1.0)
+	var mi: MeshInstance3D = rec["mi"]
+	if mi == null:
+		mi = MeshInstance3D.new()
+		mi.name = "Chunk%d_%d" % [key.x, key.y]
+		rec["mi"] = mi
+		add_child(mi)
+	mi.mesh = mesh
+	col[_cy] = rec
+
+
+func _on_doc_reset() -> void:
+	selected_light_id = -1
+	_drag_light_id = -1
+	_light_edit_active = false
+	_stroking = false
+	_sync_light_nodes()
+	_apply_environment()
+	_clear_chunks()
+	_rebuild_chunks_from_grid()
+	_mesh_dirty = true
+
+
+## Applies the sun saved in the document to the scene. Called on load/reset so
+## a lit scene reopens as authored.
+func _apply_environment() -> void:
+	sun.light_energy = doc.sun_energy
+	sun.light_color = doc.sun_color
+	sun.shadow_enabled = doc.sun_shadows
+	sun.rotation_degrees = Vector3(doc.sun_pitch, doc.sun_yaw, 0.0)
+	sun.visible = doc.sun_energy > 0.001
+	_sync_sun_ui()
+
+
+## Rebuilds the chunk-cell index from the raw grid and derives chunk records
+## (after load/reset/horizon change): one record per touched 64x64 region whose
+## center is within the horizon of the camera focus.
+func _rebuild_chunks_from_grid() -> void:
+	_grid_chunks = {}
+	_chunk_cells = {}
+	for p: Vector3i in doc.grid:
+		var key := _chunk_key(p)
+		if not _grid_chunks.has(key):
+			_grid_chunks[key] = true
+			_chunk_cells[key] = [] as Array[Vector3i]
+		(_chunk_cells[key] as Array[Vector3i]).append(p)
+	for key: Vector2i in _grid_chunks:
+		_touch_chunk(key.x * CHUNK_SIZE, key.y * CHUNK_SIZE)
+
+
+## Sets how far from the camera the renderer meshes (chunks whose center is
+## farther are freed). 0 means unlimited. Shared by the UI spinbox and MCP.
+## The meshed set follows the camera as it orbits, pans, zooms or flies.
+func set_render_horizon(horizon: int) -> void:
+	render_horizon = UNLIMITED_HORIZON if horizon <= 0 else horizon
+	_last_horizon_camera = Vector3(INF, 0, INF) # force re-evaluation below
+	if render_horizon >= UNLIMITED_HORIZON:
+		# Back to unlimited: re-mesh everything that a previous cap dropped.
+		for key: Vector2i in _grid_chunks:
+			if not _chunks.has(key):
+				_touch_chunk(key.x * CHUNK_SIZE, key.y * CHUNK_SIZE)
+		return
+	_update_horizon_chunks()
+
+
+## Rebuilds the meshed chunk set around the current camera position. Cheap
+## when the horizon is unlimited or the camera barely moved.
+func _update_horizon_chunks() -> void:
+	if render_horizon >= UNLIMITED_HORIZON:
+		return
+	var cam: Vector3 = camera.global_position
+	if Vector2(cam.x - _last_horizon_camera.x, cam.z - _last_horizon_camera.z).length() < CHUNK_SIZE * 0.25:
+		return
+	_last_horizon_camera = cam
+	# Add newly in-range chunks, free those that left the radius.
+	for key: Vector2i in _grid_chunks:
+		if _chunk_within_horizon(key) and not _chunks.has(key):
+			_touch_chunk(key.x * CHUNK_SIZE, key.y * CHUNK_SIZE)
+	var dropped: Array[Vector2i] = []
+	for key: Vector2i in _chunks:
+		if not _chunk_within_horizon(key):
+			dropped.append(key)
+	for key: Vector2i in dropped:
+		var col: Dictionary = _chunks[key]
+		for cy: int in col:
+			var mi: MeshInstance3D = col[cy]["mi"]
+			if mi != null:
+				mi.queue_free()
+		_chunks.erase(key)
+
+
+func _clear_chunks() -> void:
+	for key: Vector2i in _chunks:
+		for cy: int in _chunks[key]:
+			var rec: Dictionary = _chunks[key][cy]
+			var mi: MeshInstance3D = rec["mi"]
+			if mi != null:
+				mi.queue_free()
+	_chunks = {}
 
 
 # --- Camera ---
@@ -384,6 +653,13 @@ func _set_orthographic(on: bool) -> void:
 	_update_camera()
 
 
+## Sets the directional sun (any of energy/yaw/pitch/color/shadows) and saves
+## it with the model. Shared by the Lighting panel and MCP.
+func set_sun_properties(properties: Dictionary) -> void:
+	doc.set_sun(properties)
+	_apply_environment()
+
+
 func _orbit(delta: Vector2) -> void:
 	_yaw -= delta.x * 0.005
 	_pitch = clampf(_pitch - delta.y * 0.005, deg_to_rad(-89.0), deg_to_rad(20.0))
@@ -395,25 +671,64 @@ func _pan(delta: Vector2) -> void:
 	_focus += (-rot.x * delta.x + rot.y * delta.y) * k
 
 
+## Camera-relative flight: WASD follows the view horizontally, Space/C moves
+## vertically. Speed follows the zoom distance so large models stay navigable.
+func _update_navigation(delta: float) -> void:
+	var focus: Control = get_viewport().gui_get_focus_owner()
+	if focus != null and (focus is LineEdit or focus is TextEdit):
+		return
+	if Input.is_physical_key_pressed(KEY_CTRL) or Input.is_physical_key_pressed(KEY_META):
+		return
+	var axis := Vector3(
+		float(Input.is_physical_key_pressed(KEY_D)) - float(Input.is_physical_key_pressed(KEY_A)),
+		float(Input.is_physical_key_pressed(KEY_SPACE)) - float(Input.is_physical_key_pressed(KEY_C)),
+		float(Input.is_physical_key_pressed(KEY_S)) - float(Input.is_physical_key_pressed(KEY_W)))
+	if axis.is_zero_approx():
+		return
+	var rot: Basis = camera.global_transform.basis
+	var right: Vector3 = rot.x
+	var forward := Vector3(-rot.z.x, 0.0, -rot.z.z).normalized()
+	var direction: Vector3 = right * axis.x + forward * -axis.z + Vector3.UP * axis.y
+	if direction.is_zero_approx():
+		return
+	var speed: float = NAVIGATION_SPEED * maxf(_distance / 60.0, 0.1)
+	if Input.is_physical_key_pressed(KEY_SHIFT):
+		speed *= NAVIGATION_FAST_MULTIPLIER
+	_focus += direction.normalized() * speed * delta
+
+
 # --- Per-frame ---
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	_frame += 1
+	_update_navigation(delta)
 	if _mesh_dirty:
-		_rebuild_mesh()
-		_update_status()
+		_update_dirty_chunks()
 	_update_camera()
-
+	_update_horizon_chunks()
+	light_rig.update_handle_scales(camera)
 	var mouse: Vector2 = get_viewport().get_mouse_position()
 	var origin: Vector3 = camera.project_ray_origin(mouse)
 	var dir: Vector3 = camera.project_ray_normal(mouse)
 
 	if _stroking:
-		if not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
-			_finish_stroke()
-		else:
+		# Light drags live on a camera-facing plane; voxel strokes keep their
+		# original face-locked plane and polling behavior.
+		if _light_edit_active:
+			if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+				_stroke_mouse_driven = true
+				_drag_light_to_screen(mouse)
+			elif _stroke_mouse_driven:
+				_finish_light_drag()
+			return
+		# via the MCP API (no button held) end through end_stroke instead.
+		if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+			_stroke_mouse_driven = true
 			_update_stroke(origin, dir)
 			_update_ghost()
-			return
+		elif _stroke_mouse_driven:
+			_finish_stroke()
+		return
 
 	var camera_drag: bool = (Input.get_mouse_button_mask() & (MOUSE_BUTTON_MASK_MIDDLE | MOUSE_BUTTON_MASK_RIGHT)) != 0
 	if get_viewport().gui_get_hovered_control() != null or camera_drag:
@@ -426,7 +741,7 @@ func _process(_delta: float) -> void:
 func _compute_hover(origin: Vector3, dir: Vector3) -> Dictionary:
 	var info: Dictionary = {"valid": false}
 	var r: Dictionary = VoxelRaycast.cast(doc.grid, doc.bounds, origin, dir)
-	var adds: bool = current_tool == Tool.PLACE or current_tool == Tool.BOX
+	var adds: bool = current_tool == Tool.PLACE or current_tool == Tool.BOX or current_tool == Tool.LIGHT_PLACE
 	if height_lock and adds:
 		return _hover_on_layer(origin, dir)
 	var normal: Vector3i = r["normal"]
@@ -482,6 +797,19 @@ static func _axis_of(n: Vector3i) -> int:
 
 func _begin_stroke(h: Dictionary) -> void:
 	var cell: Vector3i = h["cell"]
+	if current_tool == Tool.LIGHT_PLACE:
+		var p := Vector3(cell) + Vector3.ONE * 0.5
+		var id: int = add_point_light(p, Color("ffd9a0"))
+		_say("Added point light %d" % id if id >= 0 else "Light limit or bounds reached")
+		return
+	if current_tool == Tool.LIGHT_EDIT:
+		var screen: Vector2 = get_viewport().get_mouse_position()
+		var id: int = light_rig.pick(camera.project_ray_origin(screen), camera.project_ray_normal(screen))
+		if id >= 0:
+			_begin_light_drag(id)
+		else:
+			_select_light(-1)
+		return
 	match current_tool:
 		Tool.PICK:
 			if doc.grid.has(cell):
@@ -560,7 +888,267 @@ func _finish_stroke() -> void:
 			doc.erase_cells(cells)
 	doc.end_stroke()
 	_stroking = false
+	_stroke_mouse_driven = false
 	_last_cell = Vector3i(-1, -1, -1)
+
+
+# --- Point-light editing ---
+
+func _sync_light_nodes() -> void:
+	if light_rig == null:
+		return
+	if selected_light_id >= 0 and not doc.lights.has(selected_light_id):
+		selected_light_id = -1
+	light_rig.sync(doc.lights, selected_light_id)
+	_sync_light_ui()
+
+
+func _select_light(id: int) -> bool:
+	if id >= 0 and not doc.lights.has(id):
+		return false
+	selected_light_id = id
+	_sync_light_nodes()
+	return true
+
+
+## Steps through the lights in ID order; direction -1 or +1. Selects the first
+## (or last) light when nothing is selected. Returns the new selection.
+func cycle_light(direction: int) -> int:
+	if doc.lights.is_empty():
+		return -1
+	var ids: Array = doc.lights.keys()
+	ids.sort()
+	if selected_light_id < 0:
+		_select_light(ids[0] if direction >= 0 else ids[ids.size() - 1])
+		return selected_light_id
+	# Find the current position and wrap around at the ends.
+	var at: int = ids.find(selected_light_id)
+	if at == -1:
+		_select_light(ids[0])
+		return selected_light_id
+	var next: int = wrapi(at + (1 if direction >= 0 else -1), 0, ids.size())
+	_select_light(ids[next])
+	return selected_light_id
+
+
+func add_point_light(position: Vector3, c: Color = Color("ffd9a0"), energy: float = VoxelDocument.LIGHT_DEFAULT_ENERGY, range_value: float = VoxelDocument.LIGHT_DEFAULT_RANGE, shadows: bool = true) -> int:
+	var id: int = doc.add_light({"position": position, "color": c, "energy": energy, "range": range_value, "shadows": shadows})
+	if id >= 0:
+		selected_light_id = id
+		_sync_light_nodes()
+	return id
+
+
+func update_point_light(id: int, properties: Dictionary) -> bool:
+	doc.begin_stroke()
+	var changed: bool = doc.update_light(id, properties)
+	doc.end_stroke()
+	if changed:
+		_sync_light_nodes()
+	return changed
+
+
+func remove_point_light(id: int) -> bool:
+	if not doc.lights.has(id):
+		return false
+	doc.begin_stroke()
+	var changed: bool = doc.remove_light(id)
+	doc.end_stroke()
+	if changed:
+		_sync_light_nodes()
+	return changed
+
+
+func _begin_light_drag(id: int) -> void:
+	if id < 0 or not doc.lights.has(id):
+		return
+	_select_light(id)
+	_drag_light_id = id
+	_drag_light_plane = Plane(camera.global_basis.z, doc.lights[id]["position"])
+	doc.begin_stroke()
+	_light_edit_active = true
+	_stroking = true
+	_stroke_tool = Tool.LIGHT_EDIT
+	_stroke_mouse_driven = false
+
+
+func _drag_light_to_screen(screen: Vector2) -> void:
+	if _drag_light_id < 0 or not doc.lights.has(_drag_light_id):
+		return
+	var origin: Vector3 = camera.project_ray_origin(screen)
+	var dir: Vector3 = camera.project_ray_normal(screen)
+	var hit: Variant = _drag_light_plane.intersects_ray(origin, dir)
+	if hit != null:
+		doc.update_light(_drag_light_id, {"position": hit})
+		_sync_light_nodes()
+
+
+func _finish_light_drag() -> void:
+	doc.end_stroke()
+	_light_edit_active = false
+	_stroking = false
+	_stroke_mouse_driven = false
+	_drag_light_id = -1
+
+
+func _sync_light_ui() -> void:
+	if _light_selection_label == null:
+		return
+	var valid: bool = doc.lights.has(selected_light_id)
+	_syncing_ui = true
+	_light_selection_label.text = "Light %d / %d" % [selected_light_id, doc.lights.size()] if valid else "%d lights" % doc.lights.size()
+	for spin: SpinBox in _light_position_spins:
+		spin.editable = valid
+	_light_energy_spin.editable = valid
+	_light_range_spin.editable = valid
+	_light_color_button.disabled = not valid
+	_light_shadows_check.disabled = not valid
+	_light_delete_button.disabled = not valid
+	if valid:
+		var l: Dictionary = doc.lights[selected_light_id]
+		var p: Vector3 = l["position"]
+		for i in 3:
+			_light_position_spins[i].value = p[i]
+		_light_color_button.color = l["color"]
+		_light_energy_spin.value = l["energy"]
+		_light_range_spin.value = l["range"]
+		_light_shadows_check.set_pressed_no_signal(l["shadows"])
+	_syncing_ui = false
+
+
+func _update_selected_light(properties: Dictionary) -> void:
+	if _syncing_ui or selected_light_id < 0:
+		return
+	if not update_point_light(selected_light_id, properties):
+		_say("Light is outside the model bounds")
+		_sync_light_ui()
+
+
+func _update_selected_light_position(_value: float = 0.0) -> void:
+	if _syncing_ui or selected_light_id < 0:
+		return
+	var p := Vector3(_light_position_spins[0].value, _light_position_spins[1].value, _light_position_spins[2].value)
+	_update_selected_light({"position": p})
+
+
+func _build_sun_ui(parent: VBoxContainer) -> void:
+	var body := _section(parent, "Sun (directional)")
+	var sun_energy_row := HBoxContainer.new()
+	body.add_child(sun_energy_row)
+	sun_energy_row.add_child(_label("Energy"))
+	_sun_energy_spin = _spin(0, VoxelDocument.MAX_SUN_ENERGY, 0.05, VoxelDocument.DEFAULT_SUN_ENERGY)
+	_sun_energy_spin.value_changed.connect(func(v: float) -> void:
+		if not _syncing_ui:
+			set_sun_properties({"energy": v}))
+	sun_energy_row.add_child(_sun_energy_spin)
+	var sun_angle_row := HBoxContainer.new()
+	body.add_child(sun_angle_row)
+	sun_angle_row.add_child(_label("Yaw"))
+	_sun_yaw_spin = _spin(-180, 180, 1, VoxelDocument.DEFAULT_SUN_YAW)
+	_sun_yaw_spin.value_changed.connect(func(v: float) -> void:
+		if not _syncing_ui:
+			set_sun_properties({"yaw": v}))
+	sun_angle_row.add_child(_sun_yaw_spin)
+	sun_angle_row.add_child(_label("Pitch"))
+	_sun_pitch_spin = _spin(VoxelDocument.SUN_PITCH_MIN, VoxelDocument.SUN_PITCH_MAX, 1, VoxelDocument.DEFAULT_SUN_PITCH)
+	_sun_pitch_spin.value_changed.connect(func(v: float) -> void:
+		if not _syncing_ui:
+			set_sun_properties({"pitch": v}))
+	sun_angle_row.add_child(_sun_pitch_spin)
+	_sun_color_button = ColorPickerButton.new()
+	_sun_color_button.edit_alpha = false
+	_sun_color_button.custom_minimum_size = Vector2(0, 28)
+	_sun_color_button.color = Color(1, 1, 1)
+	_sun_color_button.color_changed.connect(func(c: Color) -> void:
+		if not _syncing_ui:
+			set_sun_properties({"color": c}))
+	body.add_child(_sun_color_button)
+	_sun_shadows_check = CheckButton.new()
+	_sun_shadows_check.text = "Sun casts shadows"
+	_sun_shadows_check.button_pressed = true
+	_sun_shadows_check.focus_mode = Control.FOCUS_NONE
+	_sun_shadows_check.toggled.connect(func(on: bool) -> void:
+		if not _syncing_ui:
+			set_sun_properties({"shadows": on}))
+	body.add_child(_sun_shadows_check)
+	_sync_sun_ui()
+
+
+func _build_light_ui(parent: VBoxContainer) -> void:
+	# Point lights are the tallest section, so they start collapsed.
+	var body := _section(parent, "Lighting — point lights", false)
+	_light_handles_check = CheckButton.new()
+	_light_handles_check.text = "Show light handles"
+	_light_handles_check.button_pressed = true
+	_light_handles_check.focus_mode = Control.FOCUS_NONE
+	_light_handles_check.toggled.connect(func(on: bool) -> void:
+		light_rig.handles_visible = on)
+	body.add_child(_light_handles_check)
+	# < Light 3/9 > [Delete] — cycle through lights and remove the current one.
+	var cycle_row := HBoxContainer.new()
+	cycle_row.add_theme_constant_override("separation", 4)
+	body.add_child(cycle_row)
+	var prev_button := _button("<", func() -> void: cycle_light(-1))
+	prev_button.custom_minimum_size = Vector2(26, 26)
+	prev_button.tooltip_text = "Select the previous light"
+	cycle_row.add_child(prev_button)
+	_light_selection_label = _label("0 lights")
+	_light_selection_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_light_selection_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	cycle_row.add_child(_light_selection_label)
+	var next_button := _button(">", func() -> void: cycle_light(1))
+	next_button.custom_minimum_size = Vector2(26, 26)
+	next_button.tooltip_text = "Select the next light"
+	cycle_row.add_child(next_button)
+	_light_delete_button = _button("Delete", func() -> void: remove_point_light(selected_light_id))
+	_light_delete_button.custom_minimum_size = Vector2(64, 26)
+	_light_delete_button.tooltip_text = "Delete the selected light (Delete key)"
+	cycle_row.add_child(_light_delete_button)
+	var pos_row := HBoxContainer.new()
+	body.add_child(pos_row)
+	for axis: String in ["X", "Y", "Z"]:
+		pos_row.add_child(_label(axis))
+		var spin: SpinBox = _spin(0, 1024, 0.1, 0)
+		spin.value_changed.connect(_update_selected_light_position)
+		_light_position_spins.append(spin)
+		pos_row.add_child(spin)
+	var energy_row := HBoxContainer.new()
+	body.add_child(energy_row)
+	energy_row.add_child(_label("Energy"))
+	_light_energy_spin = _spin(0, VoxelDocument.LIGHT_MAX_ENERGY, 0.05, 1.0)
+	_light_energy_spin.value_changed.connect(func(v: float) -> void: _update_selected_light({"energy": v}))
+	energy_row.add_child(_light_energy_spin)
+	var range_row := HBoxContainer.new()
+	body.add_child(range_row)
+	range_row.add_child(_label("Radius"))
+	_light_range_spin = _spin(VoxelDocument.LIGHT_MIN_RANGE, VoxelDocument.LIGHT_MAX_RANGE, 0.25, VoxelDocument.LIGHT_DEFAULT_RANGE)
+	_light_range_spin.value_changed.connect(func(v: float) -> void: _update_selected_light({"range": v}))
+	range_row.add_child(_light_range_spin)
+	_light_color_button = ColorPickerButton.new()
+	_light_color_button.edit_alpha = false
+	_light_color_button.custom_minimum_size = Vector2(0, 28)
+	_light_color_button.color = Color("ffd9a0")
+	_light_color_button.color_changed.connect(func(c: Color) -> void: _update_selected_light({"color": c}))
+	body.add_child(_light_color_button)
+	_light_shadows_check = CheckButton.new()
+	_light_shadows_check.text = "Cast shadows"
+	_light_shadows_check.button_pressed = true
+	_light_shadows_check.toggled.connect(func(on: bool) -> void: _update_selected_light({"shadows": on}))
+	body.add_child(_light_shadows_check)
+	_sync_sun_ui()
+	_sync_light_ui()
+
+
+func _sync_sun_ui() -> void:
+	if _sun_energy_spin == null:
+		return
+	_syncing_ui = true
+	_sun_energy_spin.value = doc.sun_energy
+	_sun_yaw_spin.value = doc.sun_yaw
+	_sun_pitch_spin.value = doc.sun_pitch
+	_sun_color_button.color = doc.sun_color
+	_sun_shadows_check.set_pressed_no_signal(doc.sun_shadows)
+	_syncing_ui = false
 
 
 # --- Ghost preview ---
@@ -608,6 +1196,8 @@ func _show_ghost(center: Vector3, extent: Vector3, t: Tool) -> void:
 			c = Color(1, 1, 1, 0.35)
 		Tool.FILL:
 			c = Color(color.r, color.g, color.b, 0.6)
+		Tool.LIGHT_PLACE, Tool.LIGHT_EDIT:
+			c = Color(1.0, 0.85, 0.6, 0.55)
 		_:
 			c = Color(color.r, color.g, color.b, 0.5)
 	_ghost_mat.albedo_color = c
@@ -620,14 +1210,26 @@ func _unhandled_input(event: InputEvent) -> void:
 		var mb := event as InputEventMouseButton
 		if mb.pressed:
 			match mb.button_index:
-				MOUSE_BUTTON_LEFT:
+				MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT:
+					# Any click that reaches the viewport drops keyboard focus
+					# from a spin box. Without this, a field edited earlier keeps
+					# eating WASD/Space/C until the next *left* click, so
+					# middle-dragging to orbit appeared to break navigation.
 					get_viewport().gui_release_focus()
-					if _hover.get("valid", false) and not _stroking:
+					if mb.button_index == MOUSE_BUTTON_LEFT and _hover.get("valid", false) and not _stroking:
 						_begin_stroke(_hover)
-				MOUSE_BUTTON_WHEEL_UP:
-					_distance = clampf(_distance * 0.9, 3.0, 400.0)
-				MOUSE_BUTTON_WHEEL_DOWN:
-					_distance = clampf(_distance / 0.9, 3.0, 400.0)
+				MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN:
+					# A ScrollContainer at its top/bottom edge no longer consumes
+					# the wheel, and the event would fall through to zoom here.
+					# Ignore it while any control is hovered (same gate as clicks).
+					if get_viewport().gui_get_hovered_control() != null:
+						get_viewport().set_input_as_handled()
+						return
+					get_viewport().gui_release_focus()
+					if mb.button_index == MOUSE_BUTTON_WHEEL_UP:
+						_distance = clampf(_distance * 0.9, 3.0, 400.0)
+					else:
+						_distance = clampf(_distance / 0.9, 3.0, 400.0)
 	elif event is InputEventMouseMotion:
 		var mm := event as InputEventMouseMotion
 		if (mm.button_mask & (MOUSE_BUTTON_MASK_MIDDLE | MOUSE_BUTTON_MASK_RIGHT)) != 0:
@@ -637,12 +1239,17 @@ func _unhandled_input(event: InputEvent) -> void:
 				_orbit(mm.relative)
 	elif event is InputEventKey:
 		var k := event as InputEventKey
+		# Cmd (meta) = Ctrl on macOS; ignore raw modifier presses.
+		if k.keycode == KEY_META:
+			return
 		if k.pressed and not k.echo and _handle_key(k):
 			get_viewport().set_input_as_handled()
 
 
 func _handle_key(k: InputEventKey) -> bool:
-	if k.ctrl_pressed or k.meta_pressed:
+	# Shortcuts fire on Ctrl (Windows/Linux) or Cmd (macOS).
+	var mod: bool = k.ctrl_pressed or k.command_or_control_autoremap
+	if mod:
 		match k.keycode:
 			KEY_Z:
 				if k.shift_pressed:
@@ -668,6 +1275,11 @@ func _handle_key(k: InputEventKey) -> bool:
 		KEY_5: _set_tool(Tool.BOX)
 		KEY_6: _set_tool(Tool.BOX_ERASE)
 		KEY_7: _set_tool(Tool.FILL)
+		KEY_8: _set_tool(Tool.LIGHT_PLACE)
+		KEY_9: _set_tool(Tool.LIGHT_EDIT)
+		KEY_DELETE:
+			if selected_light_id >= 0:
+				remove_point_light(selected_light_id)
 		KEY_H: _set_height_lock(not height_lock)
 		KEY_BRACKETRIGHT, KEY_PAGEUP: _step_layer(1)
 		KEY_BRACKETLEFT, KEY_PAGEDOWN: _step_layer(-1)
@@ -763,6 +1375,7 @@ func _write_file(target: String) -> void:
 
 func _ask_new() -> void:
 	_confirm_discard(func() -> void:
+		_doc_replaced = true
 		doc.reset()
 		frame_model()
 		_say("New model"))
@@ -811,11 +1424,93 @@ func _on_file_selected(chosen: String) -> void:
 		_write_file(p)
 
 
+# --- Screenshots ---
+
+func _ask_save_screenshot() -> void:
+	var model_name: String = doc.path.get_file().get_basename() if doc.path != "" else "voxdot"
+	_screenshot_dialog.current_dir = _default_screenshot_dir()
+	_screenshot_dialog.current_file = model_name + ".png"
+	_screenshot_dialog.popup_centered()
+
+
+func _default_screenshot_dir() -> String:
+	var pictures: String = OS.get_system_dir(OS.SYSTEM_DIR_PICTURES)
+	if pictures == "":
+		return _default_dir()
+	var dir: String = pictures.path_join(APP_TITLE)
+	DirAccess.make_dir_recursive_absolute(dir)
+	return dir
+
+
+## Captures only the model and background as a PNG. The UI, grid, bounds,
+## mirror/work planes and placement ghost are hidden for one clean frame, then
+## restored exactly. Returns an empty string in headless mode or on failure.
+func save_screenshot(target: String) -> String:
+	if _capturing_screenshot:
+		_say("A screenshot is already being captured")
+		return ""
+	var p: String = target
+	if p.get_extension().to_lower() != "png":
+		p += ".png"
+	var dir: String = p.get_base_dir()
+	if dir != "" and not DirAccess.dir_exists_absolute(dir):
+		var dir_err: Error = DirAccess.make_dir_recursive_absolute(dir)
+		if dir_err != OK:
+			_say("Screenshot folder failed (%s): %s" % [error_string(dir_err), dir])
+			return ""
+	if DisplayServer.get_name() == "headless":
+		_say("Screenshot unavailable in headless mode")
+		return ""
+	_capturing_screenshot = true
+	var overlays: Array[Node3D] = [_grid_mi, _ghost, _mirror_x_mi, _mirror_z_mi, _layer_mi, light_rig.handles_root]
+	var visibility: Array[bool] = []
+	for overlay: Node3D in overlays:
+		visibility.append(overlay.visible)
+	var ui_visible: bool = _ui_layer.visible
+	_set_screenshot_overlays_visible(false)
+	# Two draws: one for canvas/dialog hiding to take effect, one clean image.
+	await RenderingServer.frame_post_draw
+	await RenderingServer.frame_post_draw
+	var result: String = ""
+	var tex: ViewportTexture = get_viewport().get_texture()
+	if tex == null:
+		_say("Screenshot unavailable: no viewport texture")
+	else:
+		var img: Image = tex.get_image()
+		if img == null or img.is_empty():
+			_say("Screenshot unavailable: empty viewport image")
+		else:
+			var err: Error = img.save_png(p)
+			if err == OK:
+				_say("Screenshot saved " + p)
+				result = p
+			else:
+				_say("Screenshot failed (%s): %s" % [error_string(err), p])
+	for i in overlays.size():
+		overlays[i].visible = visibility[i]
+	_ui_layer.visible = ui_visible
+	_capturing_screenshot = false
+	return result
+
+
+func _set_screenshot_overlays_visible(on: bool) -> void:
+	_ui_layer.visible = on
+	for overlay: Node3D in [_grid_mi, _ghost, _mirror_x_mi, _mirror_z_mi, _layer_mi, light_rig.handles_root]:
+		overlay.visible = on
+
+
+func _on_screenshot_selected(chosen: String) -> void:
+	# Close the picker before the clean-frame capture starts.
+	await get_tree().process_frame
+	save_screenshot(chosen)
+
+
 # --- UI ---
 
 func _build_ui() -> void:
 	var layer := CanvasLayer.new()
 	layer.name = "UI"
+	_ui_layer = layer
 	add_child(layer)
 	var root := Control.new()
 	root.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -825,7 +1520,7 @@ func _build_ui() -> void:
 	var panel := PanelContainer.new()
 	panel.name = "ToolPanel"
 	panel.set_anchors_and_offsets_preset(Control.PRESET_LEFT_WIDE)
-	panel.custom_minimum_size = Vector2(250, 0)
+	panel.custom_minimum_size = Vector2(264, 0)
 	var panel_style := StyleBoxFlat.new()
 	panel_style.bg_color = Color(0.13, 0.14, 0.18, 1.0)
 	panel_style.set_content_margin_all(8)
@@ -836,7 +1531,7 @@ func _build_ui() -> void:
 	panel.add_child(scroll)
 	var vb := VBoxContainer.new()
 	vb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	vb.add_theme_constant_override("separation", 6)
+	vb.add_theme_constant_override("separation", 4)
 	scroll.add_child(vb)
 
 	var title := Label.new()
@@ -844,33 +1539,82 @@ func _build_ui() -> void:
 	title.add_theme_font_size_override("font_size", 18)
 	vb.add_child(title)
 
-	_section(vb, "Tool")
+	# Undo/redo sit above the sections so they stay reachable without scrolling.
+	var hist := HBoxContainer.new()
+	vb.add_child(hist)
+	_undo_button = _button("Undo", _do_undo)
+	_undo_button.tooltip_text = "Undo the last edit (Ctrl+Z / Cmd+Z)"
+	_undo_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hist.add_child(_undo_button)
+	_redo_button = _button("Redo", _do_redo)
+	_redo_button.tooltip_text = "Redo the last undone edit (Ctrl+Shift+Z or Ctrl+Y)"
+	_redo_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hist.add_child(_redo_button)
+
+	var file_body := _section(vb, "File")
+	var file_grid := GridContainer.new()
+	file_grid.columns = 2
+	file_body.add_child(file_grid)
+	for entry: Array in [
+		["New", _ask_new, "New model (Ctrl+N)"],
+		["Open", _ask_open, "Open a model (Ctrl+O)"],
+		["Save", _save.bind(false), "Save (Ctrl+S)"],
+		["Save As", _save.bind(true), "Save under a new name (Ctrl+Shift+S)"],
+	]:
+		var b := _button(entry[0], entry[1])
+		b.tooltip_text = entry[2]
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		file_grid.add_child(b)
+
+	var model_body := _section(vb, "Model", false)
+	var axes: Array[String] = ["W", "H", "D"]
+	var bounds_row := HBoxContainer.new()
+	model_body.add_child(bounds_row)
+	for i in 3:
+		bounds_row.add_child(_label(axes[i]))
+		var s := _spin(VoxelDocument.MIN_BOUND, VoxelDocument.MAX_BOUND, 1, 32)
+		s.value_changed.connect(_on_bounds_spin)
+		bounds_row.add_child(s)
+		_bound_spins.append(s)
+	var size_row := HBoxContainer.new()
+	model_body.add_child(size_row)
+	size_row.add_child(_label("Voxel size (m)"))
+	_size_spin = _spin(0.005, 4.0, 0.0005, 0.0625)
+	_size_spin.value_changed.connect(func(v: float) -> void:
+		if not _syncing_ui:
+			doc.set_voxel_size(v))
+	size_row.add_child(_size_spin)
+
+	var tool_body := _section(vb, "Tool")
 	var tools := GridContainer.new()
-	tools.columns = 2
-	vb.add_child(tools)
+	tools.columns = 3
+	tool_body.add_child(tools)
 	for i in TOOL_NAMES.size():
 		var b := Button.new()
-		b.text = "%d  %s" % [i + 1, TOOL_NAMES[i]]
+		b.text = "%d %s" % [i + 1, TOOL_NAMES[i]]
 		b.toggle_mode = true
 		b.focus_mode = Control.FOCUS_NONE
+		b.add_theme_font_size_override("font_size", 12)
+		b.custom_minimum_size = Vector2(0, 26)
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		b.pressed.connect(_set_tool.bind(i as Tool))
 		tools.add_child(b)
 		_tool_buttons.append(b)
 	_hint_label = Label.new()
 	_hint_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_hint_label.add_theme_font_size_override("font_size", 12)
 	_hint_label.add_theme_color_override("font_color", Color(0.7, 0.75, 0.85))
-	vb.add_child(_hint_label)
+	tool_body.add_child(_hint_label)
 
 	var depth_row := HBoxContainer.new()
-	vb.add_child(depth_row)
+	tool_body.add_child(depth_row)
 	depth_row.add_child(_label("Box depth"))
 	_depth_spin = _spin(1, 64, 1, 1)
 	_depth_spin.value_changed.connect(func(v: float) -> void: box_depth = int(v))
 	depth_row.add_child(_depth_spin)
 
 	var lock_row := HBoxContainer.new()
-	vb.add_child(lock_row)
+	tool_body.add_child(lock_row)
 	_lock_check = CheckButton.new()
 	_lock_check.text = "Height lock (H)"
 	_lock_check.focus_mode = Control.FOCUS_NONE
@@ -880,7 +1624,7 @@ func _build_ui() -> void:
 			_set_height_lock(on))
 	lock_row.add_child(_lock_check)
 	var layer_row := HBoxContainer.new()
-	vb.add_child(layer_row)
+	tool_body.add_child(layer_row)
 	layer_row.add_child(_label("Layer Y"))
 	_layer_spin = _spin(0, 31, 1, 0)
 	_layer_spin.value_changed.connect(func(v: float) -> void:
@@ -888,97 +1632,82 @@ func _build_ui() -> void:
 			_set_layer(int(v)))
 	layer_row.add_child(_layer_spin)
 
-	_section(vb, "Color")
-	_color_button = ColorPickerButton.new()
-	_color_button.edit_alpha = false
-	_color_button.custom_minimum_size = Vector2(0, 30)
-	_color_button.focus_mode = Control.FOCUS_NONE
-	_color_button.color = color
-	_color_button.color_changed.connect(func(c: Color) -> void: color = Color(c.r, c.g, c.b, 1.0))
-	vb.add_child(_color_button)
-	_swatch_grid = GridContainer.new()
-	_swatch_grid.columns = 8
-	_swatch_grid.add_theme_constant_override("h_separation", 3)
-	_swatch_grid.add_theme_constant_override("v_separation", 3)
-	vb.add_child(_swatch_grid)
-	var add_swatch := _button("+ Add current color to palette", func() -> void: doc.add_swatch(color))
-	vb.add_child(add_swatch)
-
-	_section(vb, "Symmetry")
+	# Mirror flags are edit settings, so they live with the tools.
+	var mirror_row := HBoxContainer.new()
+	tool_body.add_child(mirror_row)
 	_mirror_x_check = CheckButton.new()
 	_mirror_x_check.text = "Mirror X  (X)"
 	_mirror_x_check.focus_mode = Control.FOCUS_NONE
 	_mirror_x_check.toggled.connect(func(on: bool) -> void:
 		if not _syncing_ui:
 			_set_mirror(on, doc.mirror_z))
-	vb.add_child(_mirror_x_check)
+	mirror_row.add_child(_mirror_x_check)
 	_mirror_z_check = CheckButton.new()
 	_mirror_z_check.text = "Mirror Z  (Z)"
 	_mirror_z_check.focus_mode = Control.FOCUS_NONE
 	_mirror_z_check.toggled.connect(func(on: bool) -> void:
 		if not _syncing_ui:
 			_set_mirror(doc.mirror_x, on))
-	vb.add_child(_mirror_z_check)
+	mirror_row.add_child(_mirror_z_check)
 
-	_section(vb, "Model")
-	var axes: Array[String] = ["W", "H", "D"]
-	var bounds_row := HBoxContainer.new()
-	vb.add_child(bounds_row)
-	for i in 3:
-		bounds_row.add_child(_label(axes[i]))
-		var s := _spin(VoxelDocument.MIN_BOUND, VoxelDocument.MAX_BOUND, 1, 32)
-		s.value_changed.connect(_on_bounds_spin)
-		bounds_row.add_child(s)
-		_bound_spins.append(s)
-	var size_row := HBoxContainer.new()
-	vb.add_child(size_row)
-	size_row.add_child(_label("Voxel size (m)"))
-	_size_spin = _spin(0.005, 4.0, 0.0005, 0.0625)
-	_size_spin.value_changed.connect(func(v: float) -> void:
-		if not _syncing_ui:
-			doc.set_voxel_size(v))
-	size_row.add_child(_size_spin)
+	var color_body := _section(vb, "Color")
+	_color_button = ColorPickerButton.new()
+	_color_button.edit_alpha = false
+	_color_button.custom_minimum_size = Vector2(0, 30)
+	_color_button.focus_mode = Control.FOCUS_NONE
+	_color_button.color = color
+	_color_button.color_changed.connect(func(c: Color) -> void: color = Color(c.r, c.g, c.b, 1.0))
+	color_body.add_child(_color_button)
+	_swatch_grid = GridContainer.new()
+	_swatch_grid.columns = 8
+	_swatch_grid.add_theme_constant_override("h_separation", 3)
+	_swatch_grid.add_theme_constant_override("v_separation", 3)
+	color_body.add_child(_swatch_grid)
+	var add_swatch := _button("+ Add current color to palette", func() -> void: doc.add_swatch(color))
+	color_body.add_child(add_swatch)
 
-	var hist := HBoxContainer.new()
-	vb.add_child(hist)
-	_undo_button = _button("Undo", _do_undo)
-	_undo_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	hist.add_child(_undo_button)
-	_redo_button = _button("Redo", _do_redo)
-	_redo_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	hist.add_child(_redo_button)
+	_build_sun_ui(vb)
+	_build_light_ui(vb)
 
-	_section(vb, "File")
-	var file_row := HBoxContainer.new()
-	vb.add_child(file_row)
-	for entry: Array in [["New", _ask_new], ["Open", _ask_open], ["Save", _save.bind(false)], ["Save As", _save.bind(true)]]:
-		var b := _button(entry[0], entry[1])
-		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		file_row.add_child(b)
-
-	_section(vb, "View")
+	var view_body := _section(vb, "View")
 	var view_row := HBoxContainer.new()
-	vb.add_child(view_row)
+	view_body.add_child(view_row)
 	var ortho := CheckButton.new()
 	ortho.text = "Ortho (P)"
 	ortho.focus_mode = Control.FOCUS_NONE
 	ortho.toggled.connect(_set_orthographic)
 	view_row.add_child(ortho)
 	view_row.add_child(_button("Frame (F)", frame_model))
+	var screenshot_button := _button("Screenshot…", _ask_save_screenshot)
+	screenshot_button.tooltip_text = "Save only the model and background as a PNG; HUD and editing overlays are excluded."
+	view_body.add_child(screenshot_button)
+	var horizon_row := HBoxContainer.new()
+	view_body.add_child(horizon_row)
+	horizon_row.add_child(_label("Render horizon"))
+	_horizon_spin = _spin(0, 4096, 16, 0)
+	_horizon_spin.tooltip_text = "Render horizon: only mesh chunks within this horizontal distance of the camera; raising it reveals farther parts of the model. The full model is kept and saved. 0 renders everything."
+	_horizon_spin.value_changed.connect(func(v: float) -> void:
+		if not _syncing_ui:
+			set_render_horizon(int(v)))
+	horizon_row.add_child(_horizon_spin)
 
+	vb.add_child(HSeparator.new())
 	_cursor_label = Label.new()
 	_cursor_label.text = "Cursor: -"
+	_cursor_label.add_theme_font_size_override("font_size", 12)
 	vb.add_child(_cursor_label)
 	_status_label = Label.new()
 	_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_status_label.add_theme_font_size_override("font_size", 12)
 	vb.add_child(_status_label)
 	_message_label = Label.new()
 	_message_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_message_label.add_theme_font_size_override("font_size", 12)
 	_message_label.add_theme_color_override("font_color", Color(0.6, 0.9, 0.6))
 	vb.add_child(_message_label)
 
 	var help := Label.new()
-	help.text = "LMB tool   MMB/RMB orbit\nShift+MMB/RMB pan   Wheel zoom\nQ/E rotate view   G grid\nH height lock   [ ] layer up/down\nCtrl+Z/Y undo/redo   Ctrl+S save"
+	help.text = "LMB tool   MMB/RMB orbit\nShift+MMB/RMB pan   Wheel zoom\nWASD fly   Space/C up/down   Shift fast\n1-9 tools   8 Light   9 Edit Light\nQ/E rotate view   G grid\nH height lock   [ ] layer up/down\nDelete removes selected light\nCtrl+Z/Y undo/redo   Ctrl+S save\n(Cmd instead of Ctrl on macOS)"
 	help.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	help.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	help.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
@@ -996,6 +1725,16 @@ func _build_ui() -> void:
 	_file_dialog.file_selected.connect(_on_file_selected)
 	layer.add_child(_file_dialog)
 
+	_screenshot_dialog = FileDialog.new()
+	_screenshot_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	_screenshot_dialog.use_native_dialog = false
+	_screenshot_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
+	_screenshot_dialog.title = "Save Screenshot As"
+	_screenshot_dialog.filters = PackedStringArray(["*.png ; PNG Image"])
+	_screenshot_dialog.size = Vector2i(760, 480)
+	_screenshot_dialog.file_selected.connect(_on_screenshot_selected)
+	layer.add_child(_screenshot_dialog)
+
 	_confirm_dialog = ConfirmationDialog.new()
 	_confirm_dialog.dialog_text = "Discard unsaved changes?"
 	_confirm_dialog.ok_button_text = "Discard"
@@ -1007,12 +1746,30 @@ func _build_ui() -> void:
 	layer.add_child(_confirm_dialog)
 
 
-func _section(parent: Control, text: String) -> void:
+## Adds a collapsible section header and returns the VBox to fill. Clicking the
+## header hides/shows the contents, which keeps the panel short enough that most
+## sections fit without scrolling. `expanded` sets the initial state.
+func _section(parent: Control, text: String, expanded: bool = true) -> VBoxContainer:
 	parent.add_child(HSeparator.new())
-	var l := Label.new()
-	l.text = text
-	l.add_theme_color_override("font_color", Color(0.95, 0.8, 0.35))
-	parent.add_child(l)
+	var header := Button.new()
+	header.text = ("▼  " if expanded else "▶  ") + text
+	header.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	header.flat = true
+	header.focus_mode = Control.FOCUS_NONE
+	header.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	header.tooltip_text = "Click to show or hide %s" % text
+	header.add_theme_color_override("font_color", Color(0.95, 0.8, 0.35))
+	header.add_theme_font_size_override("font_size", 13)
+	header.custom_minimum_size = Vector2(0, 22)
+	parent.add_child(header)
+	var body := VBoxContainer.new()
+	body.add_theme_constant_override("separation", 4)
+	body.visible = expanded
+	parent.add_child(body)
+	header.pressed.connect(func() -> void:
+		body.visible = not body.visible
+		header.text = ("▼  " if body.visible else "▶  ") + text)
+	return body
 
 
 func _label(text: String) -> Label:
@@ -1071,12 +1828,12 @@ func _rebuild_swatches() -> void:
 func _on_meta_changed() -> void:
 	_rebuild_grid()
 	_sync_ui_from_doc()
+	_apply_environment()
 	if _swatch_grid != null and _swatch_grid.get_child_count() != doc.swatches.size():
 		_rebuild_swatches()
 	_mirror_x_mi.visible = doc.mirror_x
 	_mirror_z_mi.visible = doc.mirror_z
 	_update_status()
-
 
 func _sync_ui_from_doc() -> void:
 	if _bound_spins.is_empty():
@@ -1088,6 +1845,10 @@ func _sync_ui_from_doc() -> void:
 	_size_spin.value = doc.voxel_size
 	_layer_spin.max_value = doc.bounds.y - 1
 	_layer_spin.value = clampi(work_layer, 0, doc.bounds.y - 1)
+	var horizon_value: int = 0
+	if render_horizon < UNLIMITED_HORIZON:
+		horizon_value = mini(render_horizon, int(_horizon_spin.max_value))
+	_horizon_spin.value = horizon_value
 	_mirror_x_check.set_pressed_no_signal(doc.mirror_x)
 	_mirror_z_check.set_pressed_no_signal(doc.mirror_z)
 	_syncing_ui = false

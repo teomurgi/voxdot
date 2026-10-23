@@ -1,3 +1,7 @@
 .godot/
 dist/
+docs/screenshots/*.import
+__pycache__/
+*.zip
+*.tar.gz
 *.tmp
