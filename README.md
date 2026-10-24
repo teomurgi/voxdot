@@ -83,20 +83,23 @@ Tests: `VOXDOT_MCP_PORT=7851 godot --headless --path . -s tests/mcp_server_test.
 Box depth extrudes Box / Box Erase. Model size (up to 1024 per axis) and real-world voxel size are in the panel.
 Shrinking the size is refused if voxels would be cut off. **Fit bounds to content** shrinks or grows W/H/D to the
 furthest occupied cell (the origin stays at 0). Files default to `~/Documents/Voxdot`.
-The panel sections (File, Model, Tool, Color, Sun, Lighting, Prefabs, View) are collapsible — click a section
-header to fold it away; Model, point lights and Prefabs start folded so the common controls fit without scrolling.
+The panel sections are collapsible — click a section header to fold it away. File, Model, Tool, Color, View and
+Help live in the left panel; Sun, Atmosphere, point lights and Prefabs live in the right **Scene** panel. Model,
+point lights, Prefabs and Help start folded so the common controls fit without scrolling.
 
 ## Lighting
 
 Every model carries its own scene mood, so a lit scene reopens exactly as you left it:
 
 - **Sun** (Sun section) — one directional light with energy, yaw/pitch, color, and a shadow toggle.
+- **Atmosphere** (Atmosphere section) — ambient fill light with an enable toggle, energy and color. It lifts
+  unlit faces without affecting the directional sun; the color/energy are saved with the model.
 - **Point lights** (Lighting section, tools `8` Light / `9` Edit Light) — up to 32 lights with position, color,
   energy, radius, and shadows. Drag a light's handle to move it, `Delete` removes the selected one, `<`/`>` cycle.
 
-Both live in the `.tres` (`VoxelModel.lights` plus the `sun_*` fields) and are available over MCP
-(`add_light`, `update_light`, `set_sun`, …). Point-light edits are undoable; sun settings are scene-wide and save
-with the model like the mirror flags.
+All three live in the `.tres` (`VoxelModel.lights` plus the `sun_*` and `atmosphere_*` fields) and are available
+over MCP (`add_light`, `update_light`, `set_sun`, …). Point-light edits are undoable; sun and atmosphere settings
+are scene-wide and save with the model like the mirror flags.
 
 **Render horizon** (View section) caps how much of a big model gets meshed: only chunks within that horizontal
 distance of the camera are rendered, and it follows the camera as you fly. Raising it reveals *farther* parts;

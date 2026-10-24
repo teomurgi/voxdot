@@ -46,6 +46,9 @@ const MAX_SUN_ENERGY: float = 16.0
 const SUN_YAW_RANGE: float = 360.0
 const SUN_PITCH_MIN: float = -89.9
 const SUN_PITCH_MAX: float = 89.9
+const DEFAULT_ATMOSPHERE_ENERGY: float = 0.08
+const MAX_ATMOSPHERE_ENERGY: float = 4.0
+const DEFAULT_ATMOSPHERE_COLOR: Color = Color(0.55, 0.57, 0.65)
 
 var grid: Dictionary = {}
 ## Point lights: integer ID -> {position: Vector3, color: Color,
@@ -63,6 +66,11 @@ var sun_yaw: float = DEFAULT_SUN_YAW
 var sun_pitch: float = DEFAULT_SUN_PITCH
 var sun_color: Color = Color(1, 1, 1)
 var sun_shadows: bool = true
+## Atmospheric/ambient fill light saved with the model. Not undoable, like the
+## sun and mirror flags.
+var atmosphere_enabled: bool = true
+var atmosphere_energy: float = DEFAULT_ATMOSPHERE_ENERGY
+var atmosphere_color: Color = DEFAULT_ATMOSPHERE_COLOR
 var path: String = ""
 var dirty: bool = false
 
@@ -451,6 +459,23 @@ func set_sun(properties: Dictionary) -> bool:
 	sun_pitch = p
 	sun_color = c
 	sun_shadows = s
+	dirty = true
+	meta_changed.emit()
+	return true
+
+
+## Sets the atmospheric/ambient fill saved with the model. Values are clamped
+## to the same ranges the editor accepts. Like set_sun, not undoable.
+func set_atmosphere(properties: Dictionary) -> bool:
+	var en: bool = bool(properties.get("enabled", atmosphere_enabled))
+	var e: float = clampf(float(properties.get("energy", atmosphere_energy)), 0.0, MAX_ATMOSPHERE_ENERGY)
+	var c: Color = Color(properties.get("color", atmosphere_color))
+	if en == atmosphere_enabled and is_equal_approx(e, atmosphere_energy) \
+			and c.is_equal_approx(atmosphere_color):
+		return false
+	atmosphere_enabled = en
+	atmosphere_energy = e
+	atmosphere_color = c
 	dirty = true
 	meta_changed.emit()
 	return true
@@ -1062,6 +1087,9 @@ func reset() -> void:
 	sun_pitch = DEFAULT_SUN_PITCH
 	sun_color = Color(1, 1, 1)
 	sun_shadows = true
+	atmosphere_enabled = true
+	atmosphere_energy = DEFAULT_ATMOSPHERE_ENERGY
+	atmosphere_color = DEFAULT_ATMOSPHERE_COLOR
 	path = ""
 	dirty = false
 	prefab_instances.clear()
@@ -1095,6 +1123,9 @@ func to_model() -> VoxelModel:
 	m.sun_pitch = sun_pitch
 	m.sun_color = sun_color
 	m.sun_shadows = sun_shadows
+	m.atmosphere_enabled = atmosphere_enabled
+	m.atmosphere_energy = atmosphere_energy
+	m.atmosphere_color = atmosphere_color
 	m.prefab_light_budget = prefab_light_budget
 	var saved: Array[VoxelPrefabInstance] = []
 	for inst: VoxelPrefabInstance in prefab_instances:
@@ -1153,6 +1184,9 @@ func load_model(m: VoxelModel, source_path: String = "") -> int:
 	sun_pitch = clampf(m.sun_pitch, SUN_PITCH_MIN, SUN_PITCH_MAX)
 	sun_color = m.sun_color
 	sun_shadows = m.sun_shadows
+	atmosphere_enabled = m.atmosphere_enabled
+	atmosphere_energy = clampf(m.atmosphere_energy, 0.0, MAX_ATMOSPHERE_ENERGY)
+	atmosphere_color = m.atmosphere_color
 	prefab_instances.clear()
 	for inst: VoxelPrefabInstance in m.prefab_instances:
 		if inst != null:

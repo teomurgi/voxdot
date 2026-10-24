@@ -29,6 +29,8 @@ const TOOL_HINTS: Array[String] = [
 	"Click an instance to select; drag to move; R rotate; Ctrl+D duplicate; B catalogue",
 ]
 const APP_TITLE: String = "Voxdot"
+const LEFT_PANEL_WIDTH: int = 264
+const RIGHT_PANEL_WIDTH: int = 352
 
 var doc := VoxelDocument.new()
 var current_tool: Tool = Tool.PLACE
@@ -157,6 +159,9 @@ var _sun_yaw_spin: SpinBox
 var _sun_pitch_spin: SpinBox
 var _sun_color_button: ColorPickerButton
 var _sun_shadows_check: CheckButton
+var _atmosphere_check: CheckButton
+var _atmosphere_energy_spin: SpinBox
+var _atmosphere_color_button: ColorPickerButton
 var _mcp: MCPServer
 var _ui_layer: CanvasLayer
 var _capturing_screenshot: bool = false
@@ -264,10 +269,10 @@ func _build_world() -> void:
 	env.background_mode = Environment.BG_COLOR
 	env.background_color = Color(0.11, 0.12, 0.15)
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.55, 0.57, 0.65)
+	env.ambient_light_color = VoxelDocument.DEFAULT_ATMOSPHERE_COLOR
 	# Keep a small constant ambient floor so unlit faces never go pitch black;
 	# the scene's mood comes from the directional sun (see _apply_environment).
-	env.ambient_light_energy = 0.08
+	env.ambient_light_energy = VoxelDocument.DEFAULT_ATMOSPHERE_ENERGY
 	var we := WorldEnvironment.new()
 	we.name = "WorldEnvironment"
 	we.environment = env
@@ -621,7 +626,15 @@ func _apply_environment() -> void:
 	sun.shadow_enabled = doc.sun_shadows
 	sun.rotation_degrees = Vector3(doc.sun_pitch, doc.sun_yaw, 0.0)
 	sun.visible = doc.sun_energy > 0.001
+	world_environment.ambient_light_color = doc.atmosphere_color
+	world_environment.ambient_light_energy = doc.atmosphere_energy if doc.atmosphere_enabled else 0.0
+	# The engine default (100 m) clips shadows out of large scenes: a 512^3
+	# pagoda viewed from 390 m cast none. Cover the whole editable volume, but
+	# cap at the camera far plane so the shadow map is not wasted off-screen.
+	var shadow_distance: float = maxf(100.0, Vector3(doc.bounds).length() * 1.5)
+	sun.directional_shadow_max_distance = minf(shadow_distance, camera.far)
 	_sync_sun_ui()
+	_sync_atmosphere_ui()
 
 
 ## Rebuilds the chunk-cell index from the raw grid and derives chunk records
@@ -729,6 +742,12 @@ func _set_orthographic(on: bool) -> void:
 ## it with the model. Shared by the Lighting panel and MCP.
 func set_sun_properties(properties: Dictionary) -> void:
 	doc.set_sun(properties)
+	_apply_environment()
+
+
+## Sets the atmospheric/ambient fill light and saves it with the model.
+func set_atmosphere_properties(properties: Dictionary) -> void:
+	doc.set_atmosphere(properties)
 	_apply_environment()
 
 
@@ -1208,6 +1227,48 @@ func _build_sun_ui(parent: VBoxContainer) -> void:
 			set_sun_properties({"shadows": on}))
 	body.add_child(_sun_shadows_check)
 	_sync_sun_ui()
+
+
+func _build_atmosphere_ui(parent: VBoxContainer) -> void:
+	var body := _section(parent, "Atmosphere")
+	_atmosphere_check = CheckButton.new()
+	_atmosphere_check.text = "Atmospheric light"
+	_atmosphere_check.focus_mode = Control.FOCUS_NONE
+	_atmosphere_check.tooltip_text = "Ambient fill light that lifts unlit faces; independent of the Sun"
+	_atmosphere_check.toggled.connect(func(on: bool) -> void:
+		if not _syncing_ui:
+			set_atmosphere_properties({"enabled": on}))
+	body.add_child(_atmosphere_check)
+	var energy_row := HBoxContainer.new()
+	body.add_child(energy_row)
+	energy_row.add_child(_label("Energy"))
+	_atmosphere_energy_spin = _spin(0, VoxelDocument.MAX_ATMOSPHERE_ENERGY, 0.01,
+		VoxelDocument.DEFAULT_ATMOSPHERE_ENERGY)
+	_atmosphere_energy_spin.value_changed.connect(func(v: float) -> void:
+		if not _syncing_ui:
+			set_atmosphere_properties({"energy": v}))
+	energy_row.add_child(_atmosphere_energy_spin)
+	_atmosphere_color_button = ColorPickerButton.new()
+	_atmosphere_color_button.edit_alpha = false
+	_atmosphere_color_button.custom_minimum_size = Vector2(0, 28)
+	_atmosphere_color_button.color = VoxelDocument.DEFAULT_ATMOSPHERE_COLOR
+	_atmosphere_color_button.color_changed.connect(func(c: Color) -> void:
+		if not _syncing_ui:
+			set_atmosphere_properties({"color": c}))
+	body.add_child(_atmosphere_color_button)
+	_sync_atmosphere_ui()
+
+
+func _sync_atmosphere_ui() -> void:
+	if _atmosphere_check == null:
+		return
+	_syncing_ui = true
+	_atmosphere_check.set_pressed_no_signal(doc.atmosphere_enabled)
+	_atmosphere_energy_spin.value = doc.atmosphere_energy
+	_atmosphere_color_button.color = doc.atmosphere_color
+	_atmosphere_energy_spin.editable = doc.atmosphere_enabled
+	_atmosphere_color_button.disabled = not doc.atmosphere_enabled
+	_syncing_ui = false
 
 
 func _build_light_ui(parent: VBoxContainer) -> void:
@@ -2221,22 +2282,7 @@ func _build_ui() -> void:
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	layer.add_child(root)
 
-	var panel := PanelContainer.new()
-	panel.name = "ToolPanel"
-	panel.set_anchors_and_offsets_preset(Control.PRESET_LEFT_WIDE)
-	panel.custom_minimum_size = Vector2(264, 0)
-	var panel_style := StyleBoxFlat.new()
-	panel_style.bg_color = Color(0.13, 0.14, 0.18, 1.0)
-	panel_style.set_content_margin_all(8)
-	panel.add_theme_stylebox_override("panel", panel_style)
-	root.add_child(panel)
-	var scroll := ScrollContainer.new()
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	panel.add_child(scroll)
-	var vb := VBoxContainer.new()
-	vb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	vb.add_theme_constant_override("separation", 4)
-	scroll.add_child(vb)
+	var vb := _side_panel(root, "ToolPanel", LEFT_PANEL_WIDTH, false)
 
 	var title := Label.new()
 	title.text = APP_TITLE
@@ -2374,10 +2420,6 @@ func _build_ui() -> void:
 	var add_swatch := _button("+ Add current color to palette", func() -> void: doc.add_swatch(color))
 	color_body.add_child(add_swatch)
 
-	_build_sun_ui(vb)
-	_build_light_ui(vb)
-	_build_prefab_ui(vb)
-
 	var view_body := _section(vb, "View")
 	var view_row := HBoxContainer.new()
 	view_body.add_child(view_row)
@@ -2400,6 +2442,14 @@ func _build_ui() -> void:
 			set_render_horizon(int(v)))
 	horizon_row.add_child(_horizon_spin)
 
+	var help_body := _section(vb, "Help", false)
+	var help_text := Label.new()
+	help_text.text = "Mouse\nLMB tool · MMB/RMB orbit\nShift+MMB/RMB pan · Wheel zoom\n\nKeyboard\nWASD fly · Space/C up/down · Shift fast\n1-9 tools · 0 Prefab · B catalogue\nR rotate prefab · Ctrl+D duplicate\nDelete deletes prefab or light\nQ/E rotate view · G grid\nH height lock · [ ] layer up/down\nCtrl+Z/Y undo/redo · Ctrl+S save\n(Cmd instead of Ctrl on macOS)"
+	help_text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	help_text.add_theme_font_size_override("font_size", 12)
+	help_text.add_theme_color_override("font_color", Color(0.7, 0.75, 0.85))
+	help_body.add_child(help_text)
+
 	vb.add_child(HSeparator.new())
 	_cursor_label = Label.new()
 	_cursor_label.text = "Cursor: -"
@@ -2415,16 +2465,17 @@ func _build_ui() -> void:
 	_message_label.add_theme_color_override("font_color", Color(0.6, 0.9, 0.6))
 	vb.add_child(_message_label)
 
-	var help := Label.new()
-	help.text = "LMB tool   MMB/RMB orbit\nShift+MMB/RMB pan   Wheel zoom\nWASD fly   Space/C up/down   Shift fast\n1-9 tools   0 Prefab   B catalogue\nR rotate prefab   Ctrl+D duplicate\nDelete deletes prefab or light\nQ/E rotate view   G grid\nH height lock   [ ] layer up/down\nCtrl+Z/Y undo/redo   Ctrl+S save\n(Cmd instead of Ctrl on macOS)"
-	help.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	help.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	help.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
-	help.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
-	help.grow_horizontal = Control.GROW_DIRECTION_BEGIN
-	help.offset_top = 8
-	help.offset_right = -10
-	root.add_child(help)
+	# Lighting and prefab content live in a separate inspector on the right,
+	# leaving the left panel for file/model/tool editing.
+	var scene := _side_panel(root, "ScenePanel", RIGHT_PANEL_WIDTH, true)
+	var scene_title := Label.new()
+	scene_title.text = "Scene"
+	scene_title.add_theme_font_size_override("font_size", 16)
+	scene.add_child(scene_title)
+	_build_sun_ui(scene)
+	_build_atmosphere_ui(scene)
+	_build_light_ui(scene)
+	_build_prefab_ui(scene)
 
 	_file_dialog = FileDialog.new()
 	_file_dialog.access = FileDialog.ACCESS_FILESYSTEM
@@ -2477,6 +2528,40 @@ func _build_ui() -> void:
 	catalog_dialog.unpack_instance_requested.connect(_on_catalogue_unpack)
 	catalog_dialog.reload_requested.connect(_reload_prefabs)
 	catalog_dialog.save_copy_requested.connect(_ask_save_copy_to_library)
+
+
+## Creates a scrollable side panel anchored to the left or right edge.
+func _side_panel(root: Control, panel_name: String, width: int, on_right: bool) -> VBoxContainer:
+	var panel := PanelContainer.new()
+	panel.name = panel_name
+	panel.anchor_top = 0.0
+	panel.anchor_bottom = 1.0
+	if on_right:
+		panel.anchor_left = 1.0
+		panel.anchor_right = 1.0
+		panel.offset_left = -float(width)
+		panel.offset_right = 0.0
+	else:
+		panel.anchor_left = 0.0
+		panel.anchor_right = 0.0
+		panel.offset_left = 0.0
+		panel.offset_right = float(width)
+	panel.offset_top = 0.0
+	panel.offset_bottom = 0.0
+	panel.custom_minimum_size = Vector2(width, 0)
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.13, 0.14, 0.18, 1.0)
+	style.set_content_margin_all(8)
+	panel.add_theme_stylebox_override("panel", style)
+	root.add_child(panel)
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	panel.add_child(scroll)
+	var vb := VBoxContainer.new()
+	vb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vb.add_theme_constant_override("separation", 4)
+	scroll.add_child(vb)
+	return vb
 
 
 ## Adds a collapsible section header and returns the VBox to fill. Clicking the

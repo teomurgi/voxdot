@@ -219,7 +219,7 @@ func _shot_prefabs() -> void:
 	_ed._last_change_frame = -100000
 	_ed._rebuild_mesh()
 	# Make room for the Prefabs section in the side panel.
-	for section: String in ["Model", "Tool", "Color", "Sun", "Lighting", "View"]:
+	for section: String in ["Model", "Tool", "Color", "Sun", "Atmosphere", "Lighting", "View"]:
 		_set_section(section, false)
 	_set_section("Prefabs", true)
 	_ed._hover = {"valid": false}

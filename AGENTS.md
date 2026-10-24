@@ -47,10 +47,9 @@ Standalone voxel model editor on **Godot 4.7.2** (system binary `/usr/bin/godot`
      `set_render_horizon(0)` must re-mesh chunks a previous cap dropped, because `_update_horizon_chunks()` returns
      early when unlimited. UI spinbox and MCP both report 0 for "all"; never leak the raw sentinel value out.
      Chunk rebuilds use the `_chunk_cells` index (chunk key -> cells), never a full-grid scan.
-   - Scene mood is one directional sun (energy/yaw/pitch/color/shadows) stored in the model and applied via
-     `_on_meta_changed` → `_apply_environment`; there is no ambient-fill control anymore (a small constant
-     ambient floor of 0.08 stays in `_build_world`). `ambient_energy` remains in the format as a legacy field
-     but nothing reads it.
+   - Scene mood is a directional sun (energy/yaw/pitch/color/shadows) plus an atmospheric ambient fill
+     (`atmosphere_enabled/energy/color`), stored in the model and applied via `_on_meta_changed` →
+     `_apply_environment`. `ambient_energy` remains a legacy field but nothing reads it.
    - Headless input tests: dummy window is 64x64 — set `root.content_scale_mode = DISABLED` and `root.size` *after* the first frames, give
      synthetic motion events a real `relative`, set `Input.use_accumulated_input = false`. Don't click "empty panel space" in tests (it can hit
      the `ColorPickerButton` and open a modal popup); click the title area `Vector2(100, 8)`. Nodes added from a
@@ -62,10 +61,14 @@ Standalone voxel model editor on **Godot 4.7.2** (system binary `/usr/bin/godot`
      focus, so editing any spin box left WASD dead. Only a *left* click released focus, so middle-dragging to orbit
      appeared to break navigation until the next left click. Release focus on every mouse press (and wheel) that reaches
      the viewport, not just LMB.
-   - Side panel: sections come from `_section(parent, title, expanded)` which returns the body `VBoxContainer` to fill
-     (the header is a flat toggle button with a ▼/▶ arrow). File is first, then Model, Tool (tools + mirror), Color,
-     Sun, point lights, View; Model and point lights start collapsed. UI tests that focus a spin box should use a
-     visible one — fields inside collapsed sections are not reliable focus fixtures.
+   - Side panels: `_side_panel(root, name, width, on_right)` builds a scrollable `PanelContainer` anchored to
+     either edge. The left **ToolPanel** holds File, Model, Tool (tools + mirror), Color, View and Help (last);
+     the right **ScenePanel** holds Sun, point lights and Prefabs. Sections come from
+     `_section(parent, title, expanded)` which returns the body `VBoxContainer` to fill (the header is a flat
+     toggle button with a ▼/▶ arrow). Model, point lights, Prefabs and Help start collapsed. Keybinding help
+     lives in the left Help section, not as a viewport overlay. The right panel is 352 px wide because the
+     light position row (three spins) needs ~311 px; narrower widths clip the Delete button. UI tests that
+     focus a spin box should use a visible one — fields inside collapsed sections are not reliable focus fixtures.
    - Resizing bounds is refused if it would drop voxels; undo/redo skips out-of-bounds cells.
 7. **Cross-platform shortcuts**: on macOS, Godot fires shortcuts with `meta_pressed` instead of `ctrl_pressed`. Use
    `k.command_or_control_autoremap` (or check both) so Ctrl works on Windows/Linux and Cmd works on macOS. Ignore
@@ -89,9 +92,9 @@ Standalone voxel model editor on **Godot 4.7.2** (system binary `/usr/bin/godot`
 10. **Lights & scene mood in the model format**: `VoxelModel.lights` packs each light as 10 floats (id, x, y, z,
     r, g, b, energy, range, shadows); positions/ranges are in voxel units and runtime instances scale them by
     `voxel_size`. Undo history entries are namespaced (`{"voxels", "lights"}`) — anything iterating raw undo
-    entries must go through `_is_legacy_history`. Scene mood (`sun_energy`, `ambient_energy`) is saved in the
+    entries must go through `_is_legacy_history`. Scene mood (`sun_*` and `atmosphere_*`) is saved in the
     same `.tres` but is not undoable (like mirror flags); the editor applies it via `_on_meta_changed`, so
-    loads/restores come for free. Godot 4.7 has no `Geometry3D.ray_intersects_sphere` — ray–sphere picking in
+    loads/restores come for free. `ambient_energy` is a legacy field and is not applied. Godot 4.7 has no `Geometry3D.ray_intersects_sphere` — ray–sphere picking in
     `voxel_light_rig.gd` is manual. Light drags lock to the camera-facing plane through the light (same rule as
     voxel strokes), so a drag target off that plane lands at the plane intersection.
 11. **README screenshots**: `tools/make_screenshots.gd` drives the real editor in a `SubViewport` and writes
@@ -146,3 +149,7 @@ Standalone voxel model editor on **Godot 4.7.2** (system binary `/usr/bin/godot`
     contain local voxels, valid prefab cells/lights and point lights; placeholders are excluded, matching
     `resize_bounds()`. `VoxelPrefabComposition.insert_candidate()` must also cache `_instance_bounds` and the
     `ok` status — otherwise `prefab_bounds()` is empty for freshly placed instances until a transform or reload.
+20. **Sun shadows on large models**: `DirectionalLight3D.directional_shadow_max_distance` defaults to 100 m,
+    so a 512³/1024³ model viewed from farther away shows no cast shadows even with `shadow_enabled = true`.
+    `_apply_environment()` sets it to `min(max(100, bounds.length() * 1.5), camera.far)`; otherwise the
+    "Sun casts shadows" toggle appears broken on the pagoda-scale examples.

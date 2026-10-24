@@ -37,6 +37,8 @@ func _run() -> void:
 	_test_render_horizon()
 	_test_panel_layout()
 	_test_fit_bounds()
+	_test_sun_shadows()
+	_test_atmosphere()
 	await _test_lights_editor()
 	await _test_mesh_and_file()
 	_test_standalone()
@@ -181,26 +183,51 @@ func _test_render_horizon() -> void:
 
 func _test_panel_layout() -> void:
 	print("panel layout")
-	var headers: Array[Button] = _section_headers(_ed.get_node("UI"))
-	var names: Array[String] = []
-	for h: Button in headers:
-		names.append(h.text.substr(3))
-	_check(names == ["File", "Model", "Tool", "Color", "Sun (directional)", "Lighting — point lights", "Prefabs", "View"],
-			"sections are ordered File → View (got %s)" % [names])
-	_check(not headers.is_empty() and headers[0].text.begins_with("▼"), "File is first and expanded")
-	var model_header: Button = headers[1]
-	var model_body: Control = model_header.get_parent().get_child(model_header.get_index() + 1)
-	_check(not model_body.visible and model_header.text.begins_with("▶"), "Model starts collapsed")
-	model_header.pressed.emit()
-	_check(model_body.visible and model_header.text.begins_with("▼"), "clicking a section header expands it")
-	var fit_button: Button = null
-	for child: Node in model_body.find_children("*", "Button", true, false):
-		if (child as Button).text == "Fit bounds to content":
-			fit_button = child as Button
-			break
-	_check(fit_button != null, "Model has a fit-bounds button")
-	model_header.pressed.emit()
-	_check(not model_body.visible, "clicking again collapses it")
+	var ui: Node = _ed.get_node("UI")
+	var left: Control = ui.find_child("ToolPanel", true, false) as Control
+	var right: Control = ui.find_child("ScenePanel", true, false) as Control
+	_check(left != null and right != null, "left and right panels exist")
+	if left == null or right == null:
+		return
+	var left_names: Array[String] = _header_names(left)
+	var right_names: Array[String] = _header_names(right)
+	_check(left_names == ["File", "Model", "Tool", "Color", "View", "Help"],
+			"left panel sections: " + str(left_names))
+	_check(right_names == ["Sun (directional)", "Atmosphere", "Lighting — point lights", "Prefabs"],
+			"right panel sections: " + str(right_names))
+	_check(is_equal_approx((left as PanelContainer).anchor_left, 0.0), "tool panel is anchored left")
+	_check(is_equal_approx((right as PanelContainer).anchor_left, 1.0), "scene panel is anchored right")
+	var help_header: Button = _header_named(left, "Help")
+	_check(help_header != null and help_header.text.begins_with("▶"), "Help starts collapsed")
+	var model_header: Button = _header_named(left, "Model")
+	_check(model_header != null, "Model section exists")
+	if model_header != null:
+		var model_body: Control = model_header.get_parent().get_child(model_header.get_index() + 1)
+		_check(not model_body.visible and model_header.text.begins_with("▶"), "Model starts collapsed")
+		model_header.pressed.emit()
+		_check(model_body.visible and model_header.text.begins_with("▼"), "clicking a section header expands it")
+		var fit_button: Button = null
+		for child: Node in model_body.find_children("*", "Button", true, false):
+			if (child as Button).text == "Fit bounds to content":
+				fit_button = child as Button
+				break
+		_check(fit_button != null, "Model has a fit-bounds button")
+		model_header.pressed.emit()
+		_check(not model_body.visible, "clicking again collapses it")
+
+
+func _header_names(node: Node) -> Array[String]:
+	var out: Array[String] = []
+	for h: Button in _section_headers(node):
+		out.append(h.text.substr(3))
+	return out
+
+
+func _header_named(node: Node, label: String) -> Button:
+	for h: Button in _section_headers(node):
+		if h.text.substr(3) == label:
+			return h
+	return null
 
 
 func _test_fit_bounds() -> void:
@@ -211,6 +238,20 @@ func _test_fit_bounds() -> void:
 	_ed._fit_bounds_to_content()
 	_check(_ed.doc.bounds == Vector3i(11, 4, 11), "fit button resizes to content: " + str(_ed.doc.bounds))
 	_check(int(_ed._bound_spins[0].value) == 11, "bounds spin boxes follow a fit")
+
+
+func _test_sun_shadows() -> void:
+	print("sun shadows")
+	_ed.doc.reset()
+	_ed.doc.resize_bounds(Vector3i(512, 512, 512))
+	_ed._apply_environment()
+	_check(_ed.sun.shadow_enabled, "sun shadows are enabled by default")
+	_check(_ed.sun.directional_shadow_max_distance >= Vector3(_ed.doc.bounds).length(),
+		"shadow distance covers the model: " + str(_ed.sun.directional_shadow_max_distance))
+	_ed.set_sun_properties({"shadows": false})
+	_check(not _ed.sun.shadow_enabled, "sun shadow toggle disables shadows")
+	_ed.set_sun_properties({"shadows": true})
+	_check(_ed.sun.shadow_enabled, "sun shadow toggle re-enables shadows")
 
 
 ## Collects the collapsible section header buttons in tree order.
@@ -225,6 +266,23 @@ func _collect_section_headers(node: Node, out: Array[Button]) -> void:
 		if child is Button and (child.text.begins_with("▼") or child.text.begins_with("▶")):
 			out.append(child)
 		_collect_section_headers(child, out)
+
+
+func _test_atmosphere() -> void:
+	print("atmosphere")
+	_ed.doc.reset()
+	_ed.set_atmosphere_properties({"enabled": true, "energy": 0.5, "color": Color(0.4, 0.5, 0.9)})
+	_check(is_equal_approx(_ed.world_environment.ambient_light_energy, 0.5), "atmosphere energy applies")
+	_check(_ed.world_environment.ambient_light_color.is_equal_approx(Color(0.4, 0.5, 0.9)),
+		"atmosphere color applies")
+	_check(_ed._atmosphere_energy_spin.editable and not _ed._atmosphere_color_button.disabled,
+		"atmosphere controls enabled")
+	_ed.set_atmosphere_properties({"enabled": false})
+	_check(is_zero_approx(_ed.world_environment.ambient_light_energy), "atmosphere off removes fill")
+	_check(not _ed._atmosphere_energy_spin.editable and _ed._atmosphere_color_button.disabled,
+		"atmosphere controls disabled when off")
+	_ed.set_atmosphere_properties({"enabled": true})
+	_check(is_equal_approx(_ed.world_environment.ambient_light_energy, 0.5), "atmosphere restores")
 
 
 func _test_lights_editor() -> void:

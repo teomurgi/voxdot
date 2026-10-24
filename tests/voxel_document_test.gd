@@ -21,6 +21,7 @@ func _initialize() -> void:
 	_test_flood_box_bounds()
 	_test_model_roundtrip()
 	_test_lights()
+	_test_atmosphere()
 	_test_raycast()
 	_test_prefabs()
 	print("voxel_document_test: ", "PASS" if _fails == 0 else "%d FAILED" % _fails)
@@ -192,6 +193,30 @@ func _test_lights() -> void:
 	e.remove_light(id3)
 	_check(e.content_extent() == Vector3i(4, 4, 4), "content extent after light removal")
 	_check(e.resize_bounds(Vector3i(8, 8, 8)), "shrink allowed once lights are gone")
+
+
+func _test_atmosphere() -> void:
+	print("atmosphere")
+	var d := VoxelDocument.new()
+	_check(d.atmosphere_enabled and is_equal_approx(d.atmosphere_energy, VoxelDocument.DEFAULT_ATMOSPHERE_ENERGY),
+		"atmosphere defaults")
+	_check(d.atmosphere_color.is_equal_approx(VoxelDocument.DEFAULT_ATMOSPHERE_COLOR), "atmosphere default color")
+	_check(d.set_atmosphere({"enabled": false, "energy": 2.5, "color": Color("4466aa")}), "set atmosphere")
+	_check(not d.atmosphere_enabled and is_equal_approx(d.atmosphere_energy, 2.5)
+		and d.atmosphere_color.is_equal_approx(Color("4466aa")), "atmosphere values stored")
+	_check(d.dirty, "atmosphere change marks dirty")
+	_check(not d.set_atmosphere({"enabled": false, "energy": 2.5, "color": Color("4466aa")}), "no-op atmosphere set")
+	_check(d.set_atmosphere({"energy": 99.0}), "atmosphere energy clamps")
+	_check(is_equal_approx(d.atmosphere_energy, VoxelDocument.MAX_ATMOSPHERE_ENERGY), "clamped atmosphere energy")
+	var path := "user://voxel_document_atmosphere.tres"
+	d.place_cells([Vector3i(0, 0, 0)] as Array[Vector3i], Color.RED)
+	_check(d.save_file(path) == OK, "save with atmosphere")
+	var e := VoxelDocument.new()
+	_check(e.load_file(path) == OK, "open with atmosphere")
+	_check(not e.atmosphere_enabled and is_equal_approx(e.atmosphere_energy, VoxelDocument.MAX_ATMOSPHERE_ENERGY),
+		"atmosphere round-trip: " + str(e.atmosphere_energy))
+	_check(e.atmosphere_color.is_equal_approx(Color("4466aa")), "atmosphere color round-trip")
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
 
 
 func _test_raycast() -> void:

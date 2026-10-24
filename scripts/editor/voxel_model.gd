@@ -32,6 +32,12 @@ const LIGHT_STRIDE: int = 10
 @export var sun_pitch: float = -50.0
 @export var sun_color: Color = Color(1, 1, 1)
 @export var sun_shadows: bool = true
+## Atmospheric/ambient fill light saved with the model. Defaults match the
+## editor's old hard-coded ambient floor, so pre-atmosphere files look the same.
+## Disabled means the ambient contribution is zero.
+@export var atmosphere_enabled: bool = true
+@export var atmosphere_energy: float = 0.08
+@export var atmosphere_color: Color = Color(0.55, 0.57, 0.65)
 ## Legacy field from an earlier ambient-fill design; no longer applied but kept
 ## so older files load and resave without churn.
 @export var ambient_energy: float = 0.75
