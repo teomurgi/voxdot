@@ -99,3 +99,50 @@ Standalone voxel model editor on **Godot 4.7.2** (system binary `/usr/bin/godot`
     not headless). Assigning `doc.grid` directly skips `last_touched`, so set `_doc_replaced = true` *before*
     emitting `changed` or the chunk renderer stays empty. Panels can be folded from the tool via the `▼/▶` header
     buttons, which is how the lighting shot makes room for the light inspector.
+12. **Prefab storage**: `VoxelPrefabInstance` stores a native `source: VoxelModel` external reference plus
+    `source_path`, a parent-relative fallback. `ResourceSaver.FLAG_RELATIVE_PATHS` only relativizes `res://`
+    paths, so models outside the project keep absolute native refs and portability relies on `source_path`.
+    Loading a parent whose source file is gone must use `ResourceLoader.set_abort_on_missing_resources(false)`
+    (VoxelDocument and `VoxelModel.load_with_prefabs` do); the instance keeps `source == null` and survives a
+    resave. `ResourceLoader.exists()` can return true for a cached resource after the file was deleted — use
+    `FileAccess.file_exists` for absolute paths (`VoxelDocument._path_exists`).
+13. **Prefab composition**: `VoxelDocument.prefab_instances` is authoritative; `prefab_composition` is a derived
+    index that stores **world cells**. Conflict/missing/incompatible instances contribute no solid cells or
+    lights but stay in the list so they can be moved out, relinked or deleted. Only `ok` instances are
+    all-or-nothing on transform. Prefab undo lives in a `"prefabs"` namespace next to `"voxels"`/`"lights"`.
+    `source_bounds` is the occupied-cell AABB snapshot (not the source's editable `bounds`) and drives red
+    placeholders. No nesting: a source containing instances is refused.
+14. **Prefab UI/tool**: `Tool.PREFAB` is appended (value 9) so shortcuts 1–9 keep their tools; the Prefab tool
+    is on `0`. Drags lock to the grabbed face plane (same rule as voxel strokes), *not* a camera-facing plane,
+    or sideways drags sink the instance in Y. A `Window` added to the tree is visible by default and swallows
+    viewport input in headless tests — instantiate `VoxelPrefabCatalogDialog` hidden. Catalogue metadata is in
+    `<library>/.voxdot/catalogue.cfg`; `VoxelPrefabCatalog.user_library_override` keeps tests out of the real
+    `~/Documents/Voxdot/Prefabs`.
+15. **Prefab lights & unpack**: instance lights render in a separate `PrefabLights` group owned by
+    `VoxelPrefabRig`; parent lights stay in `doc.lights`. The soft budget (`prefab_light_budget`, default 64)
+    only warns/asks for `allow_over_budget`; no light is dropped. Unpack writes voxels + lights atomically and
+    refuses if `doc.lights.size() + instance_lights > 32` (the parent's hard limit). `VoxelModelInstance`
+    composes linked cells/lights into its mesh and lights and skips unresolved sources with a warning.
+16. **Pagoda example prefab**: `tools/build_pagoda_512.py` saves the first cherry tree as
+    `<output dir>/Prefabs/cherry_tree.tres`, then places it as a linked instance at its original garden spot.
+    The generator builds prefab cells in local space by offsetting `emit()` (pivot `(32, 0, 32)`); root-flare
+    cells that dip below the garden surface are dropped because a prefab cannot have cells below `y=0` (and
+    they are buried anyway). The script saves the prefab through MCP, starts a fresh 512³ parent, places the
+    instance, saves, and copies the MCP screenshot next to the `.tres` as `<output>.png`.
+17. **Catalogue library overlap**: if the open model's folder is the same as the user library
+    (e.g. a model saved directly in `~/Documents/Voxdot`), `VoxelPrefabCatalog.libraries()` returns only the
+    user library so the same folder is not scanned twice and assets do not appear duplicated.
+18. **Open prefab source from catalogue**: double-clicking an asset button in the catalogue dialog launches
+    a new Voxdot instance via `OS.create_instance`. In the editor, pass
+    `["--path", ProjectSettings.globalize_path("res://"), "--", source_path]`. In a packaged build
+    `globalize_path("res://")` is empty and `OS.get_cmdline_args()` does **not** expose the wrapper's
+    `--main-pack`, so find the adjacent `voxdot.pck` (or `../Resources/voxdot.pck` on macOS) and pass
+    `["--main-pack", pack, "--", source_path]`; verify with the packaged runtime, not just the editor.
+    Use `get_viewport().set_input_as_handled()` (not `accept_event()`) inside a `gui_input` handler
+    connected from a Button. Remember that bound arguments come *after* signal arguments:
+    `button.gui_input.connect(_on_gui_input.bind(asset_id))` calls `_on_gui_input(event, asset_id)`,
+    not `_on_gui_input(asset_id, event)`.
+19. **Fit bounds to content**: `VoxelDocument.content_extent()` returns the smallest origin-anchored bounds that
+    contain local voxels, valid prefab cells/lights and point lights; placeholders are excluded, matching
+    `resize_bounds()`. `VoxelPrefabComposition.insert_candidate()` must also cache `_instance_bounds` and the
+    `ok` status — otherwise `prefab_bounds()` is empty for freshly placed instances until a transform or reload.

@@ -7,12 +7,15 @@ extends Node3D
 ## tools, hover preview and UI.
 ##
 ## Controls: LMB tool | MMB/RMB orbit | Shift+MMB/RMB pan | wheel zoom
-## 1-7 tools | H height lock, [ ] layer down/up | X/Z mirror | Q/E rotate view | P ortho | G grid | F reframe
+## 1-9 tools, 0 Prefab | H height lock, [ ] layer down/up | X/Z mirror | Q/E rotate view | P ortho | G grid | F reframe
+## B catalogue | R rotate prefab | Ctrl+D duplicate prefab | Delete prefab/light | Esc cancel
 ## Ctrl+Z / Ctrl+Shift+Z undo/redo | Ctrl+N/O/S new/open/save (+Shift = save as)
 
-enum Tool { PLACE, ERASE, PAINT, PICK, BOX, BOX_ERASE, FILL, LIGHT_PLACE, LIGHT_EDIT }
+## PREFAB is appended (not first) so the existing 1–9 shortcuts keep their
+## tool; the Prefab tool itself is on `0`.
+enum Tool { PLACE, ERASE, PAINT, PICK, BOX, BOX_ERASE, FILL, LIGHT_PLACE, LIGHT_EDIT, PREFAB }
 
-const TOOL_NAMES: Array[String] = ["Place", "Erase", "Paint", "Pick", "Box", "Box Erase", "Fill", "Light", "Edit Light"]
+const TOOL_NAMES: Array[String] = ["Place", "Erase", "Paint", "Pick", "Box", "Box Erase", "Fill", "Light", "Edit Light", "Prefab"]
 const TOOL_HINTS: Array[String] = [
 	"Click/drag to add voxels",
 	"Click/drag to remove voxels",
@@ -23,6 +26,7 @@ const TOOL_HINTS: Array[String] = [
 	"Recolor all connected voxels of the same color",
 	"Click to add a point light; drag on the work plane to position it",
 	"Click a light handle to select it; drag to move it; Delete removes it",
+	"Click an instance to select; drag to move; R rotate; Ctrl+D duplicate; B catalogue",
 ]
 const APP_TITLE: String = "Voxdot"
 
@@ -46,6 +50,35 @@ var _yaw: float = deg_to_rad(45.0)
 var _pitch: float = deg_to_rad(-35.264)
 var _distance: float = 60.0
 var _focus: Vector3 = Vector3(16, 6, 16)
+
+# --- Prefabs ---
+## Linked instance currently selected in the viewport (-1 = none).
+var selected_prefab_id: int = -1
+## Asset armed for placement from the catalogue ("" = selection mode).
+var armed_asset_id: String = ""
+var armed_source: VoxelModel
+var armed_pivot: Vector3 = Vector3.ZERO
+var armed_yaw: int = 0
+var prefab_rig: VoxelPrefabRig
+var catalog := VoxelPrefabCatalog.new()
+var catalog_dialog: VoxelPrefabCatalogDialog
+var _drag_prefab_id: int = -1
+var _drag_prefab_origin: Vector3i = Vector3i.ZERO
+var _drag_prefab_start := Vector3.ZERO
+var _prefab_drag_active: bool = false
+var _prefab_drag_moved: bool = false
+var _prefab_panel_label: Label
+var _prefab_selection_label: Label
+var _prefab_problems_label: Label
+var _prefab_budget_spin: SpinBox
+var _prefab_unpack_button: Button
+var _prefab_delete_button: Button
+var armed_bounds: AABB = AABB()
+var _ghost_check_key: String = ""
+var _ghost_check_ok: bool = false
+var _ghost_check_reason: String = ""
+var _rmb_dragged: bool = false
+var _library_dialog: FileDialog
 
 var _ghost: MeshInstance3D
 var _ghost_mat: StandardMaterial3D
@@ -136,6 +169,9 @@ func _ready() -> void:
 	_build_world()
 	_build_ui()
 	doc.changed.connect(func() -> void:
+		# Any document edit can change what a placement would overlap, so the
+		# cached ghost validation must not outlive it.
+		_ghost_check_key = ""
 		if _doc_replaced:
 			_doc_replaced = false
 			_on_doc_reset()
@@ -143,15 +179,20 @@ func _ready() -> void:
 			for p: Vector3i in doc.last_touched:
 				_index_cell(p)
 				_touch_chunk(p.x, p.z)
+			for key: Vector2i in doc.last_touched_prefab_chunks:
+				_touch_prefab_chunk(key)
 		_sync_light_nodes()
 		doc.last_touched.clear()
 		doc.last_touched_lights.clear()
+		doc.last_touched_prefab_chunks.clear()
+		doc.last_touched_prefabs.clear()
 		_last_change_frame = _frame
 		_mesh_dirty = true
 		if height_lock:
 			_update_layer_plane())
 	doc.meta_changed.connect(_on_meta_changed)
 	doc.history_changed.connect(_refresh_history_buttons)
+	doc.prefabs_changed.connect(_on_prefabs_changed)
 	_on_meta_changed()
 	_refresh_history_buttons()
 	_set_tool(Tool.PLACE)
@@ -243,6 +284,10 @@ func _build_world() -> void:
 	light_rig = VoxelLightRig.new()
 	light_rig.name = "VoxelLights"
 	add_child(light_rig)
+
+	prefab_rig = VoxelPrefabRig.new()
+	prefab_rig.name = "PrefabRig"
+	add_child(prefab_rig)
 
 	camera = Camera3D.new()
 	camera.name = "Camera3D"
@@ -474,6 +519,16 @@ func _index_cell(p: Vector3i) -> void:
 		cells.append(p)
 
 
+## Registers and dirties a column that may contain only linked prefab cells
+## (no local voxels), so prefab-only chunks still get a mesh.
+func _touch_prefab_chunk(key: Vector2i) -> void:
+	if not _grid_chunks.has(key):
+		_grid_chunks[key] = true
+		if not _chunk_cells.has(key):
+			_chunk_cells[key] = [] as Array[Vector3i]
+	_touch_chunk(key.x * CHUNK_SIZE, key.y * CHUNK_SIZE)
+
+
 func _mark_all_chunks_dirty() -> void:
 	for key: Vector2i in _chunks:
 		for cy: int in _chunks[key]:
@@ -523,6 +578,11 @@ func _build_chunk_mesh(key: Vector2i, col: Dictionary, _cy: int, rec: Dictionary
 	for p: Vector3i in (_chunk_cells.get(key, []) as Array):
 		if doc.grid.has(p):
 			cells[p] = doc.grid[p]
+	# Linked prefab cells merge before meshing so faces between a local voxel
+	# and an adjacent instance cell are culled like any other neighbour.
+	var prefab_colors: Dictionary = doc.prefab_composition.colors_in_column(key)
+	for p: Vector3i in prefab_colors:
+		cells[p] = prefab_colors[p]
 	var mesh: ArrayMesh = VoxelMeshBuilder.build_mesh(cells, 1.0)
 	var mi: MeshInstance3D = rec["mi"]
 	if mi == null:
@@ -539,11 +599,18 @@ func _on_doc_reset() -> void:
 	_drag_light_id = -1
 	_light_edit_active = false
 	_stroking = false
+	selected_prefab_id = -1
+	_drag_prefab_id = -1
+	_prefab_drag_active = false
+	# An armed catalogue asset survives open/new: the user may be building a
+	# scene from several models. Its source is independent of the document.
 	_sync_light_nodes()
+	_sync_prefab_rig()
 	_apply_environment()
 	_clear_chunks()
 	_rebuild_chunks_from_grid()
 	_mesh_dirty = true
+	_refresh_prefab_ui()
 
 
 ## Applies the sun saved in the document to the scene. Called on load/reset so
@@ -569,6 +636,11 @@ func _rebuild_chunks_from_grid() -> void:
 			_grid_chunks[key] = true
 			_chunk_cells[key] = [] as Array[Vector3i]
 		(_chunk_cells[key] as Array[Vector3i]).append(p)
+	# Prefab-only columns have no local cells but still need a chunk record.
+	for key: Vector2i in doc.prefab_composition.column_keys():
+		_grid_chunks[key] = true
+		if not _chunk_cells.has(key):
+			_chunk_cells[key] = [] as Array[Vector3i]
 	for key: Vector2i in _grid_chunks:
 		_touch_chunk(key.x * CHUNK_SIZE, key.y * CHUNK_SIZE)
 
@@ -740,8 +812,11 @@ func _process(delta: float) -> void:
 
 func _compute_hover(origin: Vector3, dir: Vector3) -> Dictionary:
 	var info: Dictionary = {"valid": false}
-	var r: Dictionary = VoxelRaycast.cast(doc.grid, doc.bounds, origin, dir)
-	var adds: bool = current_tool == Tool.PLACE or current_tool == Tool.BOX or current_tool == Tool.LIGHT_PLACE
+	var r: Dictionary = VoxelRaycast.cast_composed(doc.grid, doc.prefab_composition,
+		doc.bounds, origin, dir)
+	var placing: bool = current_tool == Tool.PREFAB and armed_source != null
+	var adds: bool = current_tool == Tool.PLACE or current_tool == Tool.BOX \
+		or current_tool == Tool.LIGHT_PLACE or placing
 	if height_lock and adds:
 		return _hover_on_layer(origin, dir)
 	var normal: Vector3i = r["normal"]
@@ -757,11 +832,26 @@ func _compute_hover(origin: Vector3, dir: Vector3) -> Dictionary:
 		info["cell"] = cell
 		info["normal"] = normal
 		info["face_coord"] = float(pos[a] + (1 if normal[a] > 0 else 0))
+		info["prefab_id"] = int(r.get("prefab_id", 0))
+		info["color"] = r.get("color", Color.WHITE)
 	elif r["floor"] and adds:
 		info["valid"] = true
 		info["cell"] = r["pos"]
 		info["normal"] = Vector3i.UP
 		info["face_coord"] = 0.0
+		info["prefab_id"] = 0
+		info["color"] = Color.WHITE
+	elif current_tool == Tool.PREFAB and not placing and prefab_rig != null:
+		# Missing/conflicted/incompatible instances have no solid cells, so
+		# fall back to their placeholder boxes for selection.
+		var pid: int = prefab_rig.pick_placeholder(doc, origin, dir)
+		if pid > 0:
+			info["valid"] = true
+			info["cell"] = Vector3i.ZERO
+			info["normal"] = Vector3i.UP
+			info["face_coord"] = 0.0
+			info["prefab_id"] = pid
+			info["placeholder"] = true
 	return info
 
 
@@ -797,6 +887,9 @@ static func _axis_of(n: Vector3i) -> int:
 
 func _begin_stroke(h: Dictionary) -> void:
 	var cell: Vector3i = h["cell"]
+	if current_tool == Tool.PREFAB:
+		_begin_prefab_action(h)
+		return
 	if current_tool == Tool.LIGHT_PLACE:
 		var p := Vector3(cell) + Vector3.ONE * 0.5
 		var id: int = add_point_light(p, Color("ffd9a0"))
@@ -812,12 +905,22 @@ func _begin_stroke(h: Dictionary) -> void:
 		return
 	match current_tool:
 		Tool.PICK:
+			# Pick may sample linked content; it never selects or unpacks.
 			if doc.grid.has(cell):
 				_set_color(doc.grid[cell])
+			elif doc.prefab_composition.has_cell(cell):
+				_set_color(doc.prefab_composition.color_at(cell))
 			return
 		Tool.FILL:
+			if doc.prefab_composition.has_cell(cell):
+				_say("Linked prefab: unpack to edit")
+				return
 			doc.paint_cells(doc.flood_cells(cell), color)
 			return
+		Tool.ERASE, Tool.PAINT:
+			if doc.prefab_composition.has_cell(cell):
+				_say("Linked prefab: unpack to edit")
+				return
 	_stroking = true
 	_stroke_tool = current_tool
 	_plane_normal = h["normal"]
@@ -848,6 +951,9 @@ func _apply_cell(cell: Vector3i) -> void:
 
 
 func _update_stroke(origin: Vector3, dir: Vector3) -> void:
+	if _stroke_tool == Tool.PREFAB:
+		_update_prefab_drag(origin, dir)
+		return
 	var a: int = _plane_axis
 	if absf(dir[a]) < 1e-6:
 		return
@@ -879,9 +985,21 @@ func _box_extent() -> Array[Vector3i]:
 
 
 func _finish_stroke() -> void:
+	if _stroke_tool == Tool.PREFAB:
+		_finish_prefab_drag()
+		return
 	if _is_box_tool(_stroke_tool):
 		var ext: Array[Vector3i] = _box_extent()
 		var cells: Array[Vector3i] = VoxelDocument.box_cells(ext[0], ext[1])
+		if _box_has_linked_cells(cells):
+			# All-or-nothing for both Box and Box Erase: linked instances are
+			# atomic, so a region that touches one is refused as a whole.
+			_say("Linked prefab: unpack to edit")
+			doc.end_stroke()
+			_stroking = false
+			_stroke_mouse_driven = false
+			_last_cell = Vector3i(-1, -1, -1)
+			return
 		if _stroke_tool == Tool.BOX:
 			doc.place_cells(cells, color)
 		else:
@@ -890,6 +1008,20 @@ func _finish_stroke() -> void:
 	_stroking = false
 	_stroke_mouse_driven = false
 	_last_cell = Vector3i(-1, -1, -1)
+
+
+## True when the current box extent, including mirrored copies, contains any
+## linked prefab cell.
+func _box_has_linked_cells(cells: Array[Vector3i] = []) -> bool:
+	var list: Array[Vector3i] = cells
+	if list.is_empty():
+		var ext: Array[Vector3i] = _box_extent()
+		list = VoxelDocument.box_cells(ext[0], ext[1])
+	for p: Vector3i in list:
+		for q: Vector3i in doc.mirrored(p):
+			if doc.prefab_composition.has_cell(q):
+				return true
+	return false
 
 
 # --- Point-light editing ---
@@ -907,6 +1039,10 @@ func _select_light(id: int) -> bool:
 	if id >= 0 and not doc.lights.has(id):
 		return false
 	selected_light_id = id
+	if id >= 0 and selected_prefab_id >= 0:
+		# One selection at a time, so Delete is unambiguous.
+		selected_prefab_id = -1
+		_sync_prefab_rig()
 	_sync_light_nodes()
 	return true
 
@@ -1151,14 +1287,535 @@ func _sync_sun_ui() -> void:
 	_syncing_ui = false
 
 
+## Compact action/status surface for prefabs. The visual browser lives in
+## `VoxelPrefabCatalogDialog`; this section never shows a grid.
+func _build_prefab_ui(parent: VBoxContainer) -> void:
+	var body := _section(parent, "Prefabs", false)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
+	body.add_child(row)
+	var open_button := _button("Catalogue (B)", open_catalogue)
+	open_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(open_button)
+	var reload_button := _button("Reload", _reload_prefabs)
+	reload_button.tooltip_text = "Reload every prefab source from disk and revalidate all instances"
+	row.add_child(reload_button)
+	_prefab_selection_label = _label("No instance selected")
+	_prefab_selection_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_prefab_selection_label.add_theme_font_size_override("font_size", 12)
+	body.add_child(_prefab_selection_label)
+	var sel_row := HBoxContainer.new()
+	sel_row.add_theme_constant_override("separation", 4)
+	body.add_child(sel_row)
+	_prefab_unpack_button = _button("Unpack", _unpack_selected_prefab)
+	_prefab_unpack_button.tooltip_text = "Replace the linked instance with editable voxels and lights (one undo step)"
+	_prefab_unpack_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sel_row.add_child(_prefab_unpack_button)
+	_prefab_delete_button = _button("Delete", _delete_selected_prefab)
+	_prefab_delete_button.tooltip_text = "Delete the selected instance (Delete key)"
+	_prefab_delete_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sel_row.add_child(_prefab_delete_button)
+	var lights_row := HBoxContainer.new()
+	body.add_child(lights_row)
+	_prefab_panel_label = _label("Instance lights: 0 / 64")
+	_prefab_panel_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_prefab_panel_label.add_theme_font_size_override("font_size", 12)
+	lights_row.add_child(_prefab_panel_label)
+	_prefab_budget_spin = _spin(0, 4096, 1, 64)
+	_prefab_budget_spin.custom_minimum_size = Vector2(76, 0)
+	_prefab_budget_spin.tooltip_text = "Soft warning threshold for instance lights; no light is ever dropped"
+	_prefab_budget_spin.value_changed.connect(func(v: float) -> void:
+		if not _syncing_ui:
+			doc.set_prefab_light_budget(int(v)))
+	lights_row.add_child(_prefab_budget_spin)
+	_prefab_problems_label = _label("No prefab problems")
+	_prefab_problems_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_prefab_problems_label.add_theme_font_size_override("font_size", 12)
+	body.add_child(_prefab_problems_label)
+	body.add_child(_button("Review problems...", open_prefab_problems))
+	var copy_button := _button("Save a copy to library...", _ask_save_copy_to_library)
+	copy_button.tooltip_text = "Save this model into the prefab library without changing the open document"
+	body.add_child(copy_button)
+	_refresh_prefab_ui()
+
+
+# --- Prefabs ---
+
+## Opens the visual catalogue. Scanning is lazy: the editor itself never scans
+## the libraries at startup.
+func open_catalogue() -> void:
+	if catalog_dialog == null:
+		return
+	catalog_dialog.setup(catalog, doc, doc.path.get_base_dir())
+	catalog_dialog.open_assets()
+
+
+func open_prefab_problems() -> void:
+	if catalog_dialog == null:
+		return
+	catalog_dialog.setup(catalog, doc, doc.path.get_base_dir())
+	catalog_dialog.open_problems()
+
+
+func _toggle_catalogue() -> void:
+	if catalog_dialog == null:
+		return
+	if catalog_dialog.visible:
+		catalog_dialog.hide()
+	else:
+		open_catalogue()
+
+
+## Arms a catalogue asset for repeated placement and switches to the Prefab
+## tool. The source stays referenced; placement is what dirties the document.
+func arm_prefab(asset_id: String, source: VoxelModel, pivot: Vector3) -> void:
+	if source == null:
+		_say("Cannot place: source is missing")
+		return
+	armed_asset_id = asset_id
+	armed_source = source
+	armed_pivot = VoxelPrefabInstance.snap_pivot(pivot)
+	armed_bounds = VoxelPrefabInstance.occupied_bounds(source)
+	armed_yaw = 0
+	_ghost_check_key = ""
+	_set_tool(Tool.PREFAB)
+	_say("Placing %s — LMB place, R rotate, Esc cancel" % _asset_display_name(asset_id))
+
+
+func disarm_prefab() -> void:
+	armed_source = null
+	armed_asset_id = ""
+	armed_yaw = 0
+	armed_bounds = AABB()
+	_ghost_check_key = ""
+	if prefab_rig != null:
+		prefab_rig.hide_ghost()
+
+
+func _asset_display_name(asset_id: String) -> String:
+	var a: Dictionary = catalog.asset(asset_id)
+	if a.is_empty():
+		return asset_id if asset_id != "" else "prefab"
+	return str(a.get("name", asset_id))
+
+
+func _select_prefab(id: int) -> void:
+	selected_prefab_id = id
+	if id >= 0 and selected_light_id >= 0:
+		# One selection at a time, so Delete is unambiguous.
+		selected_light_id = -1
+		_sync_light_nodes()
+	_sync_prefab_rig()
+	if id >= 0:
+		var inst: VoxelPrefabInstance = doc.prefab_instance(id)
+		if inst != null:
+			_say("Selected prefab #%d at (%d, %d, %d)" % [
+				id, inst.anchor.x, inst.anchor.y, inst.anchor.z])
+
+
+## Rebuilds instance lights, placeholders and the selection outline.
+func _sync_prefab_rig() -> void:
+	if prefab_rig == null:
+		return
+	if selected_prefab_id >= 0 and doc.prefab_instance(selected_prefab_id) == null:
+		selected_prefab_id = -1
+	prefab_rig.sync(doc, selected_prefab_id)
+	_refresh_prefab_ui()
+
+
+func _on_prefabs_changed() -> void:
+	_sync_prefab_rig()
+	_update_status()
+
+
+## Validates the armed asset at `anchor`, caching the result per anchor/yaw so
+## large sources are not re-walked every frame.
+func _ghost_candidate(anchor: Vector3i) -> Dictionary:
+	var key := "%d,%d,%d|%d|%d|%d" % [anchor.x, anchor.y, anchor.z, armed_yaw,
+		armed_source.get_instance_id(), armed_source.cells.size()]
+	if key == _ghost_check_key:
+		return {"ok": _ghost_check_ok, "reason": _ghost_check_reason}
+	var probe := VoxelPrefabInstance.new()
+	probe.asset_id = armed_asset_id
+	probe.source = armed_source
+	probe.source_bounds = armed_bounds
+	probe.pivot = armed_pivot
+	probe.anchor = anchor
+	probe.yaw_quarters = armed_yaw
+	var res: Dictionary = doc.prefab_composition.validate_candidate(probe, doc.grid, doc.bounds)
+	_ghost_check_key = key
+	_ghost_check_ok = bool(res.get("ok", false))
+	_ghost_check_reason = str(res.get("reason", ""))
+	return res
+
+
+func _update_prefab_ghost() -> void:
+	if prefab_rig == null:
+		return
+	if _stroking:
+		prefab_rig.hide_ghost()
+		_reset_prefab_hint()
+		return
+	if armed_source == null:
+		prefab_rig.hide_ghost()
+		_reset_prefab_hint()
+		return
+	if not _hover.get("valid", false):
+		prefab_rig.hide_ghost()
+		_set_cursor_text(null)
+		_reset_prefab_hint()
+		return
+	var anchor: Vector3i = _hover["cell"]
+	var candidate: Dictionary = _ghost_candidate(anchor)
+	prefab_rig.show_ghost(armed_source, armed_pivot, anchor, armed_yaw,
+		bool(candidate["ok"]), armed_bounds)
+	_set_cursor_text(anchor)
+	var hint: String = "Place at (%d, %d, %d)" % [anchor.x, anchor.y, anchor.z]
+	if not candidate["ok"]:
+		hint = "Cannot place: " + str(candidate.get("reason", "invalid"))
+	if _hint_label != null and current_tool == Tool.PREFAB:
+		_hint_label.text = hint
+
+
+## Restores the default Prefab hint after the placement hint no longer applies.
+func _reset_prefab_hint() -> void:
+	if _hint_label != null and current_tool == Tool.PREFAB:
+		_hint_label.text = TOOL_HINTS[int(Tool.PREFAB)]
+
+
+func _place_armed_at(cell: Vector3i) -> void:
+	var source: VoxelModel = armed_source
+	var asset_id: String = armed_asset_id
+	var pivot: Vector3 = armed_pivot
+	var yaw: int = armed_yaw
+	if source == null:
+		return
+	var res: Dictionary = doc.place_prefab(source, source.resource_path, asset_id,
+		pivot, cell, yaw)
+	if res.get("ok", false):
+		selected_prefab_id = int(res["instance_id"])
+		_sync_prefab_rig()
+		_say("Placed %s at (%d, %d, %d)" % [_asset_display_name(asset_id), cell.x, cell.y, cell.z])
+		return
+	if str(res.get("state", "")) == "budget":
+		var added: int = int(res.get("added_lights", 0))
+		_ask_budget_override(added, func() -> void:
+			var forced: Dictionary = doc.place_prefab(source, source.resource_path,
+				asset_id, pivot, cell, yaw, true)
+			if forced.get("ok", false):
+				selected_prefab_id = int(forced["instance_id"])
+				_sync_prefab_rig()
+				_say("Placed %s over the soft light budget" % _asset_display_name(asset_id))
+			else:
+				_say("Cannot place: " + str(forced.get("reason", ""))))
+		return
+	_say("Cannot place: " + str(res.get("reason", "")))
+
+
+func _ask_budget_override(added: int, retry: Callable) -> void:
+	if _confirm_dialog == null:
+		return
+	_confirm_dialog.dialog_text = "This placement adds %d instance lights; the scene will have %d (soft budget %d). Place anyway?" % [
+		added, doc.prefab_light_count() + added, doc.prefab_light_budget]
+	_confirm_dialog.ok_button_text = "Place anyway"
+	_pending_action = retry
+	_confirm_dialog.popup_centered()
+
+
+func _begin_prefab_action(h: Dictionary) -> void:
+	if armed_source != null:
+		_place_armed_at(h["cell"])
+		return
+	var id: int = int(h.get("prefab_id", 0))
+	if id <= 0:
+		_select_prefab(-1)
+		return
+	_select_prefab(id)
+	var inst: VoxelPrefabInstance = doc.prefab_instance(id)
+	if inst == null:
+		return
+	_drag_prefab_id = id
+	_drag_prefab_origin = inst.anchor
+	# Lock the drag to the grabbed face plane (same rule as voxel strokes), so
+	# dragging sideways on a top face never sinks the instance in Y.
+	var normal: Vector3i = h.get("normal", Vector3i.UP)
+	if normal == Vector3i.ZERO:
+		normal = Vector3i.UP
+	_plane_axis = _axis_of(normal)
+	_plane_coord = float(h.get("face_coord", 0.0))
+	var mouse: Vector2 = get_viewport().get_mouse_position()
+	var start: Variant = _prefab_plane_hit(camera.project_ray_origin(mouse),
+		camera.project_ray_normal(mouse))
+	_drag_prefab_start = (start as Vector3) if start != null else Vector3(inst.anchor)
+	_prefab_drag_active = true
+	_prefab_drag_moved = false
+	_stroking = true
+	_stroke_tool = Tool.PREFAB
+	_stroke_mouse_driven = false
+	doc.begin_stroke()
+
+
+## Intersection of a ray with the active face plane, or null when the ray is
+## parallel or points away.
+func _prefab_plane_hit(origin: Vector3, dir: Vector3) -> Variant:
+	var a: int = _plane_axis
+	if absf(dir[a]) < 1e-6:
+		return null
+	var t: float = (_plane_coord - origin[a]) / dir[a]
+	if t < 0.0:
+		return null
+	return origin + dir * t
+
+
+func _update_prefab_drag(origin: Vector3, dir: Vector3) -> void:
+	if _drag_prefab_id < 0:
+		return
+	var hit: Variant = _prefab_plane_hit(origin, dir)
+	if hit == null:
+		return
+	var delta: Vector3 = (hit as Vector3) - _drag_prefab_start
+	delta[_plane_axis] = 0.0
+	var step := Vector3i(roundi(delta.x), roundi(delta.y), roundi(delta.z))
+	var target: Vector3i = _drag_prefab_origin + step
+	var inst: VoxelPrefabInstance = doc.prefab_instance(_drag_prefab_id)
+	if inst == null or inst.anchor == target:
+		return
+	_prefab_drag_moved = true
+	var res: Dictionary = doc.move_prefab(_drag_prefab_id, target)
+	if not res.get("ok", false):
+		_say("Cannot move: " + str(res.get("reason", "")))
+
+
+func _finish_prefab_drag() -> void:
+	doc.end_stroke()
+	_prefab_drag_active = false
+	_prefab_drag_moved = false
+	_drag_prefab_id = -1
+	_stroking = false
+	_stroke_mouse_driven = false
+	_sync_prefab_rig()
+
+
+func _rotate_prefab_action() -> void:
+	if armed_source != null:
+		armed_yaw = VoxelPrefabInstance.normalize_yaw(armed_yaw + 1)
+		_ghost_check_key = ""
+		_say("Placement yaw %d°" % (armed_yaw * 90))
+		return
+	if selected_prefab_id < 0:
+		return
+	var id: int = selected_prefab_id
+	var res: Dictionary = doc.rotate_prefab(id, 1)
+	if res.get("ok", false):
+		var inst: VoxelPrefabInstance = doc.prefab_instance(id)
+		var yaw: int = inst.yaw_quarters * 90 if inst != null else 0
+		_say("Rotated prefab #%d to %d°" % [id, yaw])
+	else:
+		_say("Cannot rotate: " + str(res.get("reason", "")))
+
+
+func _duplicate_selected_prefab() -> void:
+	var inst: VoxelPrefabInstance = doc.prefab_instance(selected_prefab_id)
+	if inst == null:
+		return
+	if inst.source == null:
+		_say("Cannot duplicate: source is missing (relink it first)")
+		return
+	arm_prefab(inst.asset_id, inst.source, inst.pivot)
+	armed_yaw = inst.yaw_quarters
+	_say("Placing a duplicate of prefab #%d — Esc cancels" % inst.instance_id)
+
+
+func _delete_selected_prefab() -> void:
+	if selected_prefab_id < 0:
+		return
+	var id: int = selected_prefab_id
+	var res: Dictionary = doc.delete_prefab(id)
+	if res.get("ok", false):
+		selected_prefab_id = -1
+		_sync_prefab_rig()
+		_say("Deleted prefab #%d" % id)
+
+
+func _unpack_selected_prefab() -> void:
+	if selected_prefab_id < 0:
+		return
+	var id: int = selected_prefab_id
+	var res: Dictionary = doc.unpack_prefab(id)
+	if res.get("ok", false):
+		selected_prefab_id = -1
+		_sync_prefab_rig()
+		_say("Unpacked prefab #%d: %d voxels, %d lights" % [
+			id, int(res.get("cells", 0)), int(res.get("lights", 0))])
+	else:
+		_say("Cannot unpack: " + str(res.get("reason", "")))
+
+
+func _cancel_prefab_action() -> void:
+	if armed_source != null:
+		disarm_prefab()
+		_say("Placement cancelled")
+		return
+	if selected_prefab_id >= 0:
+		_select_prefab(-1)
+
+
+## Reloads every source from disk, revalidates the composition and refreshes
+## the catalogue. Not undoable and does not dirty the document.
+func _reload_prefabs() -> void:
+	var res: Dictionary = doc.refresh_prefabs()
+	_ghost_check_key = ""
+	_sync_prefab_rig()
+	catalog.scan(doc.path.get_base_dir())
+	if catalog_dialog != null and catalog_dialog.visible:
+		catalog_dialog.refresh()
+	_say("Reloaded %d prefabs: %d updated, %d missing, %d conflicted, %d incompatible" % [
+		int(res.get("reloaded", 0)), int(res.get("updated", 0)),
+		int(res.get("missing", 0)), int(res.get("conflicted", 0)),
+		int(res.get("incompatible", 0))])
+
+
+func _on_catalogue_place(asset_id: String) -> void:
+	var model: VoxelModel = catalog.load_asset(asset_id)
+	if model == null:
+		_say("Cannot place: asset could not be loaded")
+		return
+	var a: Dictionary = catalog.asset(asset_id)
+	arm_prefab(asset_id, model, a.get("pivot", Vector3.ZERO))
+	if catalog_dialog != null:
+		catalog_dialog.hide()
+
+
+func _on_catalogue_select_instance(id: int) -> void:
+	_set_tool(Tool.PREFAB)
+	_select_prefab(id)
+	frame_prefab(id)
+
+
+func _on_catalogue_relink(id: int, path: String) -> void:
+	var model: VoxelModel = VoxelDocument.load_model_tolerant(path)
+	if model == null:
+		_say("Relink failed: not a VoxelModel")
+		return
+	var asset: Dictionary = catalog.asset_at(path)
+	var asset_id: String = str(asset.get("asset_id", ""))
+	var r: Dictionary = doc.relink_prefab(id, model, path, asset_id)
+	if r.get("ok", false):
+		_sync_prefab_rig()
+		_say("Relinked prefab #%d to %s" % [id, path.get_file()])
+	else:
+		_say("Relink failed: " + str(r.get("reason", "")))
+
+
+func _on_catalogue_delete(id: int) -> void:
+	selected_prefab_id = id
+	_delete_selected_prefab()
+
+
+func _on_catalogue_unpack(id: int) -> void:
+	selected_prefab_id = id
+	_unpack_selected_prefab()
+
+
+## Frames the camera on one instance (used by the catalogue's Select action).
+func frame_prefab(id: int) -> void:
+	var box: AABB = doc.prefab_bounds(id)
+	if box.size.is_zero_approx():
+		var inst: VoxelPrefabInstance = doc.prefab_instance(id)
+		if inst == null:
+			return
+		box = inst.placeholder_bounds()
+	if box.size.is_zero_approx():
+		return
+	_focus = box.get_center()
+	_distance = maxf(box.size.length() * 1.8, 12.0)
+
+
+## Saves the current model into a prefab library without touching the open
+## document's path or dirty state. Refused for models with instances, because
+## a prefab source may not contain prefabs.
+func _ask_save_copy_to_library() -> void:
+	if not doc.prefab_instances.is_empty():
+		_say("Cannot save a copy: unpack the prefabs first (a prefab cannot contain prefabs)")
+		return
+	var dir: String = catalog.user_library()
+	DirAccess.make_dir_recursive_absolute(dir)
+	_library_dialog.current_dir = dir
+	_library_dialog.current_file = (doc.path.get_file().get_basename() if doc.path != "" else "prefab") + ".tres"
+	_library_dialog.popup_centered()
+
+
+func _on_library_file_selected(chosen: String) -> void:
+	var p: String = chosen
+	if p.get_extension() == "":
+		p += ".tres"
+	var model: VoxelModel = doc.to_model()
+	var err: Error = ResourceSaver.save(model, p, ResourceSaver.FLAG_RELATIVE_PATHS)
+	if err != OK:
+		_say("Save copy failed (%s): %s" % [error_string(err), p])
+		return
+	catalog.scan(doc.path.get_base_dir())
+	if catalog_dialog != null and catalog_dialog.visible:
+		catalog_dialog.refresh()
+	_say("Saved prefab copy " + p)
+
+
+func _refresh_prefab_ui() -> void:
+	if _prefab_panel_label == null:
+		return
+	_syncing_ui = true
+	var inst: VoxelPrefabInstance = doc.prefab_instance(selected_prefab_id)
+	var state: String = "ok"
+	if inst != null:
+		state = str(doc.prefab_status(selected_prefab_id).get("state", "ok"))
+		_prefab_selection_label.text = "%s  #%d\nanchor (%d, %d, %d)  yaw %d°  [%s]" % [
+			inst.source_path.get_file() if inst.source_path != "" else "instance",
+			inst.instance_id, inst.anchor.x, inst.anchor.y, inst.anchor.z,
+			inst.yaw_quarters * 90, state.capitalize()]
+	else:
+		_prefab_selection_label.text = "No instance selected"
+	if _prefab_unpack_button != null:
+		_prefab_unpack_button.disabled = inst == null or state != "ok"
+	if _prefab_delete_button != null:
+		_prefab_delete_button.disabled = inst == null
+	var over: bool = doc.prefab_light_budget_exceeded()
+	_prefab_panel_label.text = "Instance lights: %d / %d%s" % [
+		doc.prefab_light_count(), doc.prefab_light_budget,
+		"  (over budget)" if over else ""]
+	_prefab_panel_label.add_theme_color_override("font_color",
+		Color(1.0, 0.55, 0.4) if over else Color(0.85, 0.88, 0.95))
+	var counts: Dictionary = doc.prefab_status_counts()
+	var problems: int = int(counts.get("missing", 0)) + int(counts.get("conflict", 0)) \
+		+ int(counts.get("incompatible", 0))
+	if problems > 0:
+		_prefab_problems_label.text = "Problems: %d missing, %d conflicted, %d incompatible" % [
+			int(counts.get("missing", 0)), int(counts.get("conflict", 0)),
+			int(counts.get("incompatible", 0))]
+		_prefab_problems_label.add_theme_color_override("font_color", Color(1.0, 0.55, 0.4))
+	else:
+		_prefab_problems_label.text = "No prefab problems"
+		_prefab_problems_label.add_theme_color_override("font_color", Color(0.65, 0.85, 0.65))
+	if _prefab_budget_spin != null:
+		_prefab_budget_spin.value = doc.prefab_light_budget
+	_syncing_ui = false
+
+
 # --- Ghost preview ---
 
 func _update_ghost() -> void:
+	if current_tool == Tool.PREFAB:
+		_ghost.visible = false
+		_update_prefab_ghost()
+		return
 	var tool_for_ghost: Tool = _stroke_tool if _stroking else current_tool
 	if _stroking and _is_box_tool(_stroke_tool):
 		var ext: Array[Vector3i] = _box_extent()
 		_show_ghost(Vector3(ext[0]) + Vector3(ext[1] - ext[0] + Vector3i.ONE) * 0.5,
 				Vector3(ext[1] - ext[0] + Vector3i.ONE), tool_for_ghost)
+		if _box_has_linked_cells():
+			# Box and Box Erase both refuse a region that touches a linked
+			# instance, so both previews turn red.
+			_ghost_mat.albedo_color = Color(1.0, 0.2, 0.2, 0.55)
 		_set_cursor_text(_box_end)
 		return
 	if _stroking:
@@ -1172,6 +1829,11 @@ func _update_ghost() -> void:
 	var cell: Vector3i = _hover["cell"]
 	_set_cursor_text(cell)
 	_show_ghost(Vector3(cell) + Vector3.ONE * 0.5, Vector3.ONE, tool_for_ghost)
+	# Editing gestures that would touch a linked cell preview as refused.
+	if doc.prefab_composition.has_cell(cell) \
+			and (current_tool == Tool.ERASE or current_tool == Tool.PAINT \
+				or current_tool == Tool.FILL or current_tool == Tool.BOX_ERASE):
+		_ghost_mat.albedo_color = Color(1.0, 0.2, 0.2, 0.55)
 
 
 func _set_cursor_text(cell: Variant) -> void:
@@ -1218,6 +1880,11 @@ func _unhandled_input(event: InputEvent) -> void:
 					get_viewport().gui_release_focus()
 					if mb.button_index == MOUSE_BUTTON_LEFT and _hover.get("valid", false) and not _stroking:
 						_begin_stroke(_hover)
+					elif mb.button_index == MOUSE_BUTTON_LEFT and current_tool == Tool.PREFAB and not _stroking:
+						# A click on empty space clears the instance selection.
+						_select_prefab(-1)
+					elif mb.button_index == MOUSE_BUTTON_RIGHT:
+						_rmb_dragged = false
 				MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN:
 					# A ScrollContainer at its top/bottom edge no longer consumes
 					# the wheel, and the event would fall through to zoom here.
@@ -1230,9 +1897,16 @@ func _unhandled_input(event: InputEvent) -> void:
 						_distance = clampf(_distance * 0.9, 3.0, 400.0)
 					else:
 						_distance = clampf(_distance / 0.9, 3.0, 400.0)
+		elif mb.button_index == MOUSE_BUTTON_RIGHT:
+			# A right-click without a drag exits armed placement (orbit still
+			# works: moving the mouse marks the press as a drag).
+			if armed_source != null and not _rmb_dragged:
+				_cancel_prefab_action()
 	elif event is InputEventMouseMotion:
 		var mm := event as InputEventMouseMotion
 		if (mm.button_mask & (MOUSE_BUTTON_MASK_MIDDLE | MOUSE_BUTTON_MASK_RIGHT)) != 0:
+			if (mm.button_mask & MOUSE_BUTTON_MASK_RIGHT) != 0:
+				_rmb_dragged = true
 			if mm.shift_pressed:
 				_pan(mm.relative)
 			else:
@@ -1264,6 +1938,10 @@ func _handle_key(k: InputEventKey) -> bool:
 				_ask_open()
 			KEY_N:
 				_ask_new()
+			KEY_D:
+				if _text_field_focused():
+					return false
+				_duplicate_selected_prefab()
 			_:
 				return false
 		return true
@@ -1277,9 +1955,24 @@ func _handle_key(k: InputEventKey) -> bool:
 		KEY_7: _set_tool(Tool.FILL)
 		KEY_8: _set_tool(Tool.LIGHT_PLACE)
 		KEY_9: _set_tool(Tool.LIGHT_EDIT)
-		KEY_DELETE:
-			if selected_light_id >= 0:
+		KEY_0: _set_tool(Tool.PREFAB)
+		KEY_B:
+			if _text_field_focused():
+				return false
+			_toggle_catalogue()
+		KEY_R:
+			if _text_field_focused():
+				return false
+			_rotate_prefab_action()
+		KEY_DELETE, KEY_BACKSPACE:
+			if _text_field_focused():
+				return false
+			if selected_prefab_id >= 0:
+				_delete_selected_prefab()
+			elif selected_light_id >= 0:
 				remove_point_light(selected_light_id)
+		KEY_ESCAPE:
+			_cancel_prefab_action()
 		KEY_H: _set_height_lock(not height_lock)
 		KEY_BRACKETRIGHT, KEY_PAGEUP: _step_layer(1)
 		KEY_BRACKETLEFT, KEY_PAGEDOWN: _step_layer(-1)
@@ -1299,6 +1992,13 @@ func _handle_key(k: InputEventKey) -> bool:
 
 # --- Actions ---
 
+## True when typing should win over single-key shortcuts. SpinBoxes focus
+## their internal LineEdit, so the LineEdit check covers them too.
+func _text_field_focused() -> bool:
+	var f: Control = get_viewport().gui_get_focus_owner()
+	return f != null and (f is LineEdit or f is TextEdit or f is SpinBox)
+
+
 func _set_tool(t: Tool) -> void:
 	if _stroking:
 		return
@@ -1307,6 +2007,8 @@ func _set_tool(t: Tool) -> void:
 		_tool_buttons[i].set_pressed_no_signal(i == int(t))
 	if _hint_label != null:
 		_hint_label.text = TOOL_HINTS[int(t)]
+	if t != Tool.PREFAB and prefab_rig != null:
+		prefab_rig.hide_ghost()
 
 
 func _set_color(c: Color) -> void:
@@ -1390,6 +2092,8 @@ func _confirm_discard(action: Callable) -> void:
 		action.call()
 		return
 	_pending_action = action
+	_confirm_dialog.dialog_text = "Discard unsaved changes?"
+	_confirm_dialog.ok_button_text = "Discard"
 	_confirm_dialog.popup_centered()
 
 
@@ -1462,7 +2166,7 @@ func save_screenshot(target: String) -> String:
 		_say("Screenshot unavailable in headless mode")
 		return ""
 	_capturing_screenshot = true
-	var overlays: Array[Node3D] = [_grid_mi, _ghost, _mirror_x_mi, _mirror_z_mi, _layer_mi, light_rig.handles_root]
+	var overlays: Array[Node3D] = [_grid_mi, _ghost, _mirror_x_mi, _mirror_z_mi, _layer_mi, light_rig.handles_root, prefab_rig]
 	var visibility: Array[bool] = []
 	for overlay: Node3D in overlays:
 		visibility.append(overlay.visible)
@@ -1495,7 +2199,7 @@ func save_screenshot(target: String) -> String:
 
 func _set_screenshot_overlays_visible(on: bool) -> void:
 	_ui_layer.visible = on
-	for overlay: Node3D in [_grid_mi, _ghost, _mirror_x_mi, _mirror_z_mi, _layer_mi, light_rig.handles_root]:
+	for overlay: Node3D in [_grid_mi, _ghost, _mirror_x_mi, _mirror_z_mi, _layer_mi, light_rig.handles_root, prefab_rig]:
 		overlay.visible = on
 
 
@@ -1576,6 +2280,9 @@ func _build_ui() -> void:
 		s.value_changed.connect(_on_bounds_spin)
 		bounds_row.add_child(s)
 		_bound_spins.append(s)
+	var fit_button := _button("Fit bounds to content", _fit_bounds_to_content)
+	fit_button.tooltip_text = "Shrink or grow W/H/D to the furthest occupied cell; the origin stays at 0"
+	model_body.add_child(fit_button)
 	var size_row := HBoxContainer.new()
 	model_body.add_child(size_row)
 	size_row.add_child(_label("Voxel size (m)"))
@@ -1591,7 +2298,8 @@ func _build_ui() -> void:
 	tool_body.add_child(tools)
 	for i in TOOL_NAMES.size():
 		var b := Button.new()
-		b.text = "%d %s" % [i + 1, TOOL_NAMES[i]]
+		var key_label: String = "0" if i == int(Tool.PREFAB) else str(i + 1)
+		b.text = "%s %s" % [key_label, TOOL_NAMES[i]]
 		b.toggle_mode = true
 		b.focus_mode = Control.FOCUS_NONE
 		b.add_theme_font_size_override("font_size", 12)
@@ -1668,6 +2376,7 @@ func _build_ui() -> void:
 
 	_build_sun_ui(vb)
 	_build_light_ui(vb)
+	_build_prefab_ui(vb)
 
 	var view_body := _section(vb, "View")
 	var view_row := HBoxContainer.new()
@@ -1707,7 +2416,7 @@ func _build_ui() -> void:
 	vb.add_child(_message_label)
 
 	var help := Label.new()
-	help.text = "LMB tool   MMB/RMB orbit\nShift+MMB/RMB pan   Wheel zoom\nWASD fly   Space/C up/down   Shift fast\n1-9 tools   8 Light   9 Edit Light\nQ/E rotate view   G grid\nH height lock   [ ] layer up/down\nDelete removes selected light\nCtrl+Z/Y undo/redo   Ctrl+S save\n(Cmd instead of Ctrl on macOS)"
+	help.text = "LMB tool   MMB/RMB orbit\nShift+MMB/RMB pan   Wheel zoom\nWASD fly   Space/C up/down   Shift fast\n1-9 tools   0 Prefab   B catalogue\nR rotate prefab   Ctrl+D duplicate\nDelete deletes prefab or light\nQ/E rotate view   G grid\nH height lock   [ ] layer up/down\nCtrl+Z/Y undo/redo   Ctrl+S save\n(Cmd instead of Ctrl on macOS)"
 	help.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	help.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	help.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
@@ -1744,6 +2453,30 @@ func _build_ui() -> void:
 		if action.is_valid():
 			action.call())
 	layer.add_child(_confirm_dialog)
+
+	_library_dialog = FileDialog.new()
+	_library_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	_library_dialog.use_native_dialog = false
+	_library_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
+	_library_dialog.title = "Save Prefab Copy To Library"
+	_library_dialog.filters = PackedStringArray(["*.tres ; Voxel Model"])
+	_library_dialog.size = Vector2i(760, 480)
+	_library_dialog.file_selected.connect(_on_library_file_selected)
+	layer.add_child(_library_dialog)
+
+	catalog_dialog = VoxelPrefabCatalogDialog.new()
+	layer.add_child(catalog_dialog)
+	# A Window is visible when added; an open catalogue would swallow viewport
+	# input until the user asks for it.
+	catalog_dialog.visible = false
+	catalog_dialog.doc = doc
+	catalog_dialog.place_requested.connect(_on_catalogue_place)
+	catalog_dialog.select_instance_requested.connect(_on_catalogue_select_instance)
+	catalog_dialog.relink_requested.connect(_on_catalogue_relink)
+	catalog_dialog.delete_instance_requested.connect(_on_catalogue_delete)
+	catalog_dialog.unpack_instance_requested.connect(_on_catalogue_unpack)
+	catalog_dialog.reload_requested.connect(_reload_prefabs)
+	catalog_dialog.save_copy_requested.connect(_ask_save_copy_to_library)
 
 
 ## Adds a collapsible section header and returns the VBox to fill. Clicking the
@@ -1806,6 +2539,18 @@ func _on_bounds_spin(_v: float) -> void:
 	_sync_ui_from_doc()
 
 
+func _fit_bounds_to_content() -> void:
+	var fit: Vector3i = doc.content_extent()
+	if fit == Vector3i.ZERO:
+		_say("Nothing to fit: the model is empty")
+		return
+	if doc.resize_bounds(fit):
+		_say("Fitted bounds to %d x %d x %d" % [fit.x, fit.y, fit.z])
+	else:
+		_say("Can't fit bounds to the content")
+		_sync_ui_from_doc()
+
+
 func _rebuild_swatches() -> void:
 	for child in _swatch_grid.get_children():
 		_swatch_grid.remove_child(child)
@@ -1833,6 +2578,7 @@ func _on_meta_changed() -> void:
 		_rebuild_swatches()
 	_mirror_x_mi.visible = doc.mirror_x
 	_mirror_z_mi.visible = doc.mirror_z
+	_refresh_prefab_ui()
 	_update_status()
 
 func _sync_ui_from_doc() -> void:
@@ -1865,6 +2611,19 @@ func _update_status() -> void:
 		return
 	var name_text: String = doc.path.get_file() if doc.path != "" else "(unsaved)"
 	get_window().title = "%s%s - %s" % [name_text, "*" if doc.dirty else "", APP_TITLE]
-	_status_label.text = "%s%s\n%d voxels  |  %dx%dx%d" % [
-		name_text, "*" if doc.dirty else "", doc.voxel_count(),
-		doc.bounds.x, doc.bounds.y, doc.bounds.z]
+	var counts: Dictionary = doc.prefab_status_counts()
+	var problems: int = int(counts.get("missing", 0)) + int(counts.get("conflict", 0)) \
+		+ int(counts.get("incompatible", 0))
+	var line: String = "%s%s\n%d local voxels  |  %d linked  |  %dx%dx%d  |  %d prefabs  |  %d lights" % [
+		name_text, "*" if doc.dirty else "", doc.voxel_count(), doc.prefab_cell_count(),
+		doc.bounds.x, doc.bounds.y, doc.bounds.z, doc.prefab_instances.size(),
+		doc.lights.size() + doc.prefab_light_count()]
+	if problems > 0:
+		line += "\n%d missing, %d conflicted, %d incompatible" % [
+			int(counts.get("missing", 0)), int(counts.get("conflict", 0)),
+			int(counts.get("incompatible", 0))]
+	_status_label.text = line
+	if problems > 0:
+		_status_label.add_theme_color_override("font_color", Color(1.0, 0.62, 0.45))
+	else:
+		_status_label.add_theme_color_override("font_color", Color(0.88, 0.9, 0.95))

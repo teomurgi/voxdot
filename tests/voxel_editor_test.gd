@@ -36,6 +36,7 @@ func _run() -> void:
 	_test_height_lock()
 	_test_render_horizon()
 	_test_panel_layout()
+	_test_fit_bounds()
 	await _test_lights_editor()
 	await _test_mesh_and_file()
 	_test_standalone()
@@ -184,7 +185,7 @@ func _test_panel_layout() -> void:
 	var names: Array[String] = []
 	for h: Button in headers:
 		names.append(h.text.substr(3))
-	_check(names == ["File", "Model", "Tool", "Color", "Sun (directional)", "Lighting — point lights", "View"],
+	_check(names == ["File", "Model", "Tool", "Color", "Sun (directional)", "Lighting — point lights", "Prefabs", "View"],
 			"sections are ordered File → View (got %s)" % [names])
 	_check(not headers.is_empty() and headers[0].text.begins_with("▼"), "File is first and expanded")
 	var model_header: Button = headers[1]
@@ -192,8 +193,24 @@ func _test_panel_layout() -> void:
 	_check(not model_body.visible and model_header.text.begins_with("▶"), "Model starts collapsed")
 	model_header.pressed.emit()
 	_check(model_body.visible and model_header.text.begins_with("▼"), "clicking a section header expands it")
+	var fit_button: Button = null
+	for child: Node in model_body.find_children("*", "Button", true, false):
+		if (child as Button).text == "Fit bounds to content":
+			fit_button = child as Button
+			break
+	_check(fit_button != null, "Model has a fit-bounds button")
 	model_header.pressed.emit()
 	_check(not model_body.visible, "clicking again collapses it")
+
+
+func _test_fit_bounds() -> void:
+	print("fit bounds")
+	_ed.doc.reset()
+	_ed.doc.place_cells([Vector3i(10, 0, 10), Vector3i(10, 1, 10)] as Array[Vector3i], Color.RED)
+	_ed.doc.resize_bounds(Vector3i(64, 64, 64))
+	_ed._fit_bounds_to_content()
+	_check(_ed.doc.bounds == Vector3i(11, 4, 11), "fit button resizes to content: " + str(_ed.doc.bounds))
+	_check(int(_ed._bound_spins[0].value) == 11, "bounds spin boxes follow a fit")
 
 
 ## Collects the collapsible section header buttons in tree order.
@@ -301,7 +318,7 @@ func _test_mesh_and_file() -> void:
 	_ed.doc.reset()
 	_ed.doc.place_cells([Vector3i(4, 0, 4)] as Array[Vector3i], Color.RED)
 	_ed.doc.add_light({"position": Vector3(4.5, 2.0, 4.5), "color": Color("ffcc88"), "energy": 3.0, "range": 10.0})
-	_ed.doc.set_environment(0.5, 0.6)
+	_ed.doc.set_sun({"energy": 0.5})
 	_ed._write_file(path)
 	# CACHE_MODE_IGNORE: a plain load() would return the resource cached by the
 	# first load of this path, missing the lights we just saved.

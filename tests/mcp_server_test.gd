@@ -22,6 +22,8 @@ func _check(cond: bool, label: String) -> void:
 
 func _initialize() -> void:
 	_ed = (load("res://scenes/voxdot.tscn") as PackedScene).instantiate() as VoxelModelEditor
+	# Keep catalogue scans out of the real ~/Documents/Voxdot/Prefabs.
+	_ed.catalog.user_library_override = "/tmp/opencode/mcp_prefab/UserPrefabs"
 	root.add_child(_ed)
 	_run.call_deferred()
 
@@ -55,7 +57,7 @@ func _call(tool_name: String, args: Dictionary = {}) -> Dictionary:
 	var r: Dictionary = await _rpc("tools/call", {"name": tool_name, "arguments": args})
 	if r.has("result") and (r["result"] as Dictionary).has("content"):
 		var text: String = r["result"]["content"][0]["text"]
-		var parsed: Variant = JSON.parse_string(text)
+		var parsed: Variant = JSON.parse_string(text) if text.begins_with("{") or text.begins_with("[") else text
 		return {"_ok": not (r["result"] as Dictionary).has("is_error"), "_payload": parsed if typeof(parsed) == TYPE_DICTIONARY else text}
 	return {"_ok": false, "_payload": r}
 
@@ -185,6 +187,98 @@ func _run() -> void:
 	_check(absf(_ed.sun.light_energy - 0.3) < 0.01 and is_equal_approx(_ed.sun.rotation_degrees.y, -42.0), "open restores the saved sun")
 	DirAccess.remove_absolute(path)
 
+	print("prefabs over MCP")
+	_ed.doc.reset()
+	var lib_root: String = "/tmp/opencode/mcp_prefab"
+	_rmrf(lib_root)
+	DirAccess.make_dir_recursive_absolute(lib_root.path_join("Prefabs"))
+	var src_grid: Dictionary = {}
+	for x in 3:
+		for z in 3:
+			src_grid[Vector3i(x, 0, z)] = Color.RED
+	src_grid[Vector3i(1, 1, 1)] = Color.BLUE
+	var src := VoxelModel.from_grid(src_grid)
+	src.bounds = Vector3i(16, 16, 16)
+	src.lights = PackedFloat32Array([1, 1.0, 2.0, 1.0, 1.0, 0.8, 0.2, 1.5, 6.0, 1.0])
+	var src_path: String = lib_root.path_join("Prefabs/mcp_tree.tres")
+	_check(ResourceSaver.save(src, src_path) == OK, "prefab source saved")
+	var parent_path: String = lib_root.path_join("parent.tres")
+	_check((await _call("save", {"path": parent_path}))["_ok"], "parent saved so the project library is known")
+	_check((await _call("prefab_refresh_assets"))["_ok"], "prefab_refresh_assets")
+	var asset_list: Dictionary = (await _call("prefab_list_assets", {"library": "project", "search": "mcp_tree"}))["_payload"]
+	_check(asset_list["count"] == 1, "prefab_list_assets finds the source: " + str(asset_list))
+	var asset: Dictionary = asset_list["assets"][0]
+	var asset_id: String = str(asset["asset_id"])
+	_check(asset["valid"] and asset["cells"] == 10 and asset["lights"] == 1, "asset metadata")
+	var got: Dictionary = (await _call("prefab_get_asset", {"asset_id": asset_id}))["_payload"]
+	_check(got["name"] == "mcp_tree" and got["path"] == src_path, "prefab_get_asset by id")
+	_check((await _call("prefab_get_asset", {"path": src_path}))["_payload"]["asset_id"] == asset_id, "prefab_get_asset by path")
+	var pivoted: Dictionary = (await _call("prefab_set_pivot", {"asset_id": asset_id, "pivot": [2.0, 0.0, 2.0]}))["_payload"]
+	_check(pivoted["pivot"] == [2.0, 0.0, 2.0], "prefab_set_pivot persists")
+	_check((await _call("prefab_set_pivot", {"asset_id": asset_id, "pivot": [1.25, 0.0, 1.0]}))["_ok"] == false, "quarter-cell pivot refused")
+	_check((await _call("prefab_reset_pivot", {"asset_id": asset_id}))["_payload"]["pivot"] == [1.5, 0.0, 1.5], "prefab_reset_pivot")
+
+	var placed: Dictionary = (await _call("prefab_place", {"asset_id": asset_id, "anchor": [10, 0, 10]}))["_payload"]
+	_check(placed["status"] == "ok" and placed["cells"] == 10, "prefab_place returns a valid instance: " + str(placed))
+	var inst_id: int = int(placed["id"])
+	_check(placed["lights"] == 1 and _ints(placed["anchor"]) == [10, 0, 10], "placement carries light + anchor")
+	_check(((await _call("get_state"))["_payload"] as Dictionary)["prefab_instances"] == 1, "get_state reports the instance")
+	_check(((await _call("prefab_get_state"))["_payload"] as Dictionary)["lights"] == 1, "prefab_get_state counts instance lights")
+	var composed: Dictionary = (await _call("get_composed_voxels"))["_payload"]
+	_check(composed["count"] == 10, "get_composed_voxels includes prefab cells")
+	_check((composed["voxels"] as Array).all(func(v: Dictionary) -> bool: return int(v["prefab_id"]) == inst_id), "composed cells carry the owner id")
+	_check(((await _call("get_voxels"))["_payload"] as Dictionary)["count"] == 0, "get_voxels stays local-only")
+	_check((await _call("prefab_place", {"asset_id": asset_id, "anchor": [10, 0, 10]}))["_ok"] == false, "overlapping placement refused")
+	_check((await _call("prefab_place", {"asset_id": asset_id, "anchor": [31, 0, 31]}))["_ok"] == false, "out-of-bounds placement refused")
+
+	var inst_list: Dictionary = (await _call("prefab_list_instances"))["_payload"]
+	_check(inst_list["count"] == 1 and inst_list["instances"][0]["id"] == inst_id, "prefab_list_instances")
+	_check((await _call("prefab_get_instance", {"id": inst_id}))["_payload"]["source_resolved"], "prefab_get_instance resolves the source")
+	_check(_ints((await _call("prefab_move", {"id": inst_id, "anchor": [20, 0, 20]}))["_payload"]["anchor"]) == [20, 0, 20], "prefab_move")
+	_check((await _call("prefab_move", {"id": inst_id, "anchor": [31, 0, 31]}))["_ok"] == false, "move out of bounds refused")
+	_check((await _call("prefab_rotate", {"id": inst_id, "delta": 1}))["_payload"]["yaw"] == 1, "prefab_rotate")
+	var dup: Dictionary = (await _call("prefab_duplicate", {"id": inst_id, "anchor": [2, 0, 20]}))["_payload"]
+	_check(dup["status"] == "ok" and int(dup["id"]) != inst_id, "prefab_duplicate")
+	_check(dup["yaw"] == 1 and dup["cells"] == 10, "duplicate copies yaw + cells")
+	_check((await _call("prefab_duplicate", {"id": inst_id}))["_ok"] == false, "duplicate requires an anchor")
+	_check((await _call("prefab_delete", {"id": int(dup["id"])}))["_payload"]["count"] == 1, "prefab_delete")
+	_check((await _call("undo"))["_ok"], "undo after prefab delete")
+	_check(((await _call("prefab_list_instances"))["_payload"] as Dictionary)["count"] == 2, "undo restores the deleted instance")
+	_ed.doc.delete_prefab(int(dup["id"]))
+
+	_check((await _call("prefab_unpack", {"id": inst_id}))["_payload"]["cells"] == 10, "prefab_unpack")
+	_check(_ed.doc.prefab_instance(inst_id) == null and _ed.doc.voxel_count() == 10, "unpack wrote editable voxels")
+	_check(_ed.doc.lights.size() == 1, "unpack wrote the instance light")
+	_check((await _call("undo"))["_ok"] and _ed.doc.prefab_instance(inst_id) != null, "unpack is one undo step")
+
+	print("prefab missing source + relink")
+	var hidden: String = src_path + ".hidden"
+	DirAccess.rename_absolute(src_path, hidden)
+	var reloaded: Dictionary = (await _call("prefab_reload"))["_payload"]
+	_check(reloaded["missing"] == 1, "prefab_reload reports the missing source: " + str(reloaded))
+	var problems: Array = (await _call("prefab_get_state"))["_payload"]["problems"]
+	_check(problems.size() == 1 and problems[0]["state"] == "missing", "prefab_get_state lists the problem")
+	_check((await _call("prefab_unpack", {"id": inst_id}))["_ok"] == false, "missing instance cannot be unpacked")
+	DirAccess.rename_absolute(hidden, src_path)
+	var relinked: Dictionary = (await _call("prefab_relink", {"id": inst_id, "path": src_path}))["_payload"]
+	_check(relinked["status"] == "ok", "prefab_relink resolves the source")
+	_check((await _call("set_tool", {"tool": "prefab"}))["_ok"], "set_tool prefab")
+	_check((await _call("get_tool"))["_payload"]["tool"] == "prefab", "get_tool reports prefab")
+	_check(((await _call("prefab_get_instance", {"id": 999}))["_ok"]) == false, "unknown instance errors")
+
+	print("prefab catalogue follows the open model")
+	var lib2: String = "/tmp/opencode/mcp_prefab2"
+	_rmrf(lib2)
+	DirAccess.make_dir_recursive_absolute(lib2.path_join("Prefabs"))
+	var other_grid: Dictionary = {Vector3i(0, 0, 0): Color.BLUE, Vector3i(1, 0, 0): Color.BLUE}
+	_check(ResourceSaver.save(VoxelModel.from_grid(other_grid),
+		lib2.path_join("Prefabs/other.tres")) == OK, "second project source saved")
+	_check((await _call("save", {"path": lib2.path_join("parent2.tres")}))["_ok"], "save into the second project")
+	var other_list: Dictionary = (await _call("prefab_list_assets",
+		{"library": "project", "search": "other"}))["_payload"]
+	_check(other_list["count"] == 1,
+		"prefab_list_assets rescans after the model moves: " + str(other_list))
+
 	print("screenshot")
 	var shot: Dictionary = await _call("screenshot")
 	# Headless has no real viewport texture; on a live window this returns a PNG path.
@@ -201,3 +295,19 @@ func _run() -> void:
 
 	print("mcp_server_test: ", "PASS" if _fails == 0 else "%d FAILED" % _fails)
 	quit(1 if _fails > 0 else 0)
+
+
+func _rmrf(p: String) -> void:
+	var d := DirAccess.open(p)
+	if d == null:
+		return
+	for f in d.get_files():
+		DirAccess.remove_absolute(p.path_join(f))
+	for sub in d.get_directories():
+		_rmrf(p.path_join(sub))
+	DirAccess.remove_absolute(p)
+
+
+## JSON numbers come back as floats; compare cell arrays as integers.
+static func _ints(values: Array) -> Array:
+	return values.map(func(v: Variant) -> int: return int(v))

@@ -226,7 +226,7 @@ func _tool_list_tools(_args: Dictionary) -> Variant:
 	return TOOL_NAMES_LIST
 
 
-const TOOL_NAMES_LIST: Array[String] = ["place", "erase", "paint", "pick", "box", "box_erase", "fill", "light", "edit_light"]
+const TOOL_NAMES_LIST: Array[String] = ["place", "erase", "paint", "pick", "box", "box_erase", "fill", "light", "edit_light", "prefab"]
 
 
 func _tool_set_tool(args: Dictionary) -> Variant:
@@ -669,6 +669,353 @@ func _light_payload(id: int) -> Dictionary:
 		"energy": l["energy"], "range": l["range"], "shadows": l["shadows"]}
 
 
+# --- Prefabs ---
+#
+# Every call goes through the same VoxelDocument methods as the UI, so undo,
+# dirty state and validation are identical. Catalogue scans are lazy: the
+# first query scans when nothing is cached; prefab_refresh_assets is explicit.
+
+func _ensure_catalog() -> void:
+	var dir: String = editor.doc.path.get_base_dir()
+	# Rescan when nothing is cached or the open model moved to another folder:
+	# the project library is derived from the model's directory, so a stale
+	# scan would hide assets from the newly opened project.
+	if editor.catalog.asset_count() == 0 or editor.catalog.project_dir != dir:
+		editor.catalog.scan(dir)
+
+
+func _tool_prefab_list_assets(args: Dictionary) -> Variant:
+	_ensure_catalog()
+	var library: String = str(args.get("library", "all"))
+	if library not in ["all", "user", "project"]:
+		return _tool_error("library must be all, user or project")
+	var search: String = str(args.get("search", "")).to_lower()
+	var include_invalid: bool = bool(args.get("include_invalid", false))
+	var out: Array = []
+	for a: Dictionary in editor.catalog.assets():
+		if library != "all" and str(a.get("library", "")) != library:
+			continue
+		if not include_invalid and not bool(a.get("valid", false)):
+			continue
+		if search != "" and not (str(a.get("name", "")).to_lower().contains(search)
+				or str(a.get("path", "")).to_lower().contains(search)):
+			continue
+		out.append(_asset_payload(a))
+	return {"assets": out, "count": out.size(), "libraries": editor.catalog.libraries(editor.doc.path.get_base_dir())}
+
+
+func _tool_prefab_refresh_assets(_args: Dictionary) -> Variant:
+	var summary: Dictionary = editor.catalog.scan(editor.doc.path.get_base_dir())
+	return summary
+
+
+func _tool_prefab_get_asset(args: Dictionary) -> Variant:
+	_ensure_catalog()
+	var a: Dictionary = _find_asset(args)
+	if a.is_empty():
+		return _tool_error("unknown asset: give asset_id or path")
+	var payload: Dictionary = _asset_payload(a)
+	payload["thumbnail"] = _cached_thumbnail(a)
+	payload["pivot_error"] = str(a.get("pivot_error", ""))
+	return payload
+
+
+func _tool_prefab_set_pivot(args: Dictionary) -> Variant:
+	_ensure_catalog()
+	var a: Dictionary = _find_asset(args)
+	if a.is_empty():
+		return _tool_error("unknown asset: give asset_id or path")
+	var pivot: Variant = _arg_vec3(args, "pivot")
+	if pivot == null:
+		return _tool_error("pivot must be [x, y, z]")
+	var updated: Dictionary = editor.catalog.set_pivot(str(a["asset_id"]), pivot)
+	if updated.is_empty():
+		return _tool_error("unknown asset")
+	if updated.has("pivot_error"):
+		return _tool_error(str(updated["pivot_error"]))
+	return _asset_payload(updated)
+
+
+func _tool_prefab_reset_pivot(args: Dictionary) -> Variant:
+	_ensure_catalog()
+	var a: Dictionary = _find_asset(args)
+	if a.is_empty():
+		return _tool_error("unknown asset: give asset_id or path")
+	var updated: Dictionary = editor.catalog.reset_pivot(str(a["asset_id"]))
+	if updated.is_empty():
+		return _tool_error("asset source is missing")
+	return _asset_payload(updated)
+
+
+## Resolves an asset by `asset_id`, then by `path`. Returns {} when neither
+## matches. Assets from the catalogue carry their pivot and stable ID.
+func _find_asset(args: Dictionary) -> Dictionary:
+	var asset_id: String = str(args.get("asset_id", ""))
+	if asset_id != "":
+		return editor.catalog.asset(asset_id)
+	var p: String = str(args.get("path", ""))
+	if p != "":
+		return editor.catalog.asset_at(p)
+	return {}
+
+
+func _asset_payload(a: Dictionary) -> Dictionary:
+	var b: Vector3i = a.get("bounds", Vector3i.ZERO)
+	var pivot: Vector3 = a.get("pivot", Vector3.ZERO)
+	return {
+		"asset_id": str(a.get("asset_id", "")),
+		"name": str(a.get("name", "")),
+		"path": str(a.get("path", "")),
+		"relative_path": str(a.get("relative_path", "")),
+		"folder": str(a.get("folder", "")),
+		"library": str(a.get("library", "")),
+		"bounds": [b.x, b.y, b.z],
+		"cells": int(a.get("cells", 0)),
+		"lights": int(a.get("lights", 0)),
+		"pivot": [pivot.x, pivot.y, pivot.z],
+		"valid": bool(a.get("valid", false)),
+		"reason": str(a.get("reason", "")),
+		"has_prefabs": bool(a.get("has_prefabs", false)),
+	}
+
+
+func _cached_thumbnail(a: Dictionary) -> String:
+	var p: String = editor.catalog.thumbnail_path(a)
+	return p if p != "" and FileAccess.file_exists(p) else ""
+
+
+func _tool_prefab_place(args: Dictionary) -> Variant:
+	_ensure_catalog()
+	var anchor: Variant = _arg_vec3i(args, "anchor")
+	if anchor == null:
+		return _tool_error("anchor must be [x, y, z]")
+	var asset_id: String = str(args.get("asset_id", ""))
+	var source_path: String = ""
+	var source: VoxelModel = null
+	var pivot := Vector3.ZERO
+	var a: Dictionary = {}
+	if asset_id != "":
+		a = editor.catalog.asset(asset_id)
+		if a.is_empty():
+			return _tool_error("unknown asset_id: " + asset_id)
+		source = editor.catalog.load_asset(asset_id)
+		source_path = str(a.get("path", ""))
+		pivot = a.get("pivot", Vector3.ZERO)
+	elif args.has("path"):
+		source_path = str(args["path"])
+		var res: Resource = ResourceLoader.load(source_path, "", ResourceLoader.CACHE_MODE_IGNORE_DEEP)
+		if not (res is VoxelModel):
+			return _tool_error("not a VoxelModel: " + source_path)
+		source = res as VoxelModel
+		a = editor.catalog.asset_at(source_path)
+		asset_id = str(a.get("asset_id", ""))
+		pivot = a.get("pivot", VoxelPrefabCatalog.default_pivot(source))
+	else:
+		return _tool_error("asset_id or path is required")
+	if source == null:
+		return _tool_error("source is missing: " + source_path)
+	if args.has("pivot"):
+		var p: Variant = _arg_vec3(args, "pivot")
+		if p == null:
+			return _tool_error("pivot must be [x, y, z]")
+		pivot = p
+	var yaw: int = int(args.get("yaw", 0))
+	var allow: bool = bool(args.get("allow_over_budget", false))
+	var result: Dictionary = editor.doc.place_prefab(source, source_path, asset_id,
+		pivot, anchor, yaw, allow)
+	if not result.get("ok", false):
+		return _prefab_error(result)
+	editor.selected_prefab_id = int(result["instance_id"])
+	editor._sync_prefab_rig()
+	return _prefab_instance_payload(int(result["instance_id"]), true)
+
+
+func _tool_prefab_list_instances(_args: Dictionary) -> Variant:
+	var out: Array = []
+	for inst: VoxelPrefabInstance in editor.doc.prefab_instances:
+		if inst != null:
+			out.append(_prefab_instance_payload(inst.instance_id))
+	out.sort_custom(func(x: Dictionary, y: Dictionary) -> bool: return int(x["id"]) < int(y["id"]))
+	return {"instances": out, "count": out.size(),
+		"counts": editor.doc.prefab_status_counts(),
+		"selected": editor.selected_prefab_id}
+
+
+func _tool_prefab_get_instance(args: Dictionary) -> Variant:
+	var id: int = int(args.get("id", -1))
+	var payload: Dictionary = _prefab_instance_payload(id, true)
+	if payload.is_empty():
+		return _tool_error("unknown instance id: %d" % id)
+	return payload
+
+
+func _tool_prefab_move(args: Dictionary) -> Variant:
+	var id: int = int(args.get("id", -1))
+	var anchor: Variant = _arg_vec3i(args, "anchor")
+	if anchor == null:
+		return _tool_error("anchor must be [x, y, z]")
+	var result: Dictionary = editor.doc.move_prefab(id, anchor)
+	if not result.get("ok", false):
+		return _prefab_error(result)
+	return _prefab_instance_payload(id)
+
+
+func _tool_prefab_rotate(args: Dictionary) -> Variant:
+	var id: int = int(args.get("id", -1))
+	var delta: int = int(args.get("delta", 1))
+	var result: Dictionary = editor.doc.rotate_prefab(id, delta)
+	if not result.get("ok", false):
+		return _prefab_error(result)
+	return _prefab_instance_payload(id)
+
+
+func _tool_prefab_duplicate(args: Dictionary) -> Variant:
+	var id: int = int(args.get("id", -1))
+	var anchor: Variant = _arg_vec3i(args, "anchor")
+	if anchor == null:
+		return _tool_error("anchor is required ([x, y, z])")
+	var allow: bool = bool(args.get("allow_over_budget", false))
+	var result: Dictionary = editor.doc.duplicate_prefab(id, anchor, allow)
+	if not result.get("ok", false):
+		return _prefab_error(result)
+	var new_id: int = int(result["instance_id"])
+	editor.selected_prefab_id = new_id
+	editor._sync_prefab_rig()
+	return _prefab_instance_payload(new_id, true)
+
+
+func _tool_prefab_delete(args: Dictionary) -> Variant:
+	var id: int = int(args.get("id", -1))
+	var result: Dictionary = editor.doc.delete_prefab(id)
+	if not result.get("ok", false):
+		return _prefab_error(result)
+	if editor.selected_prefab_id == id:
+		editor.selected_prefab_id = -1
+		editor._sync_prefab_rig()
+	return {"deleted": id, "count": editor.doc.prefab_instances.size()}
+
+
+func _tool_prefab_unpack(args: Dictionary) -> Variant:
+	var id: int = int(args.get("id", -1))
+	var result: Dictionary = editor.doc.unpack_prefab(id)
+	if not result.get("ok", false):
+		return _prefab_error(result)
+	if editor.selected_prefab_id == id:
+		editor.selected_prefab_id = -1
+		editor._sync_prefab_rig()
+	return result
+
+
+func _tool_prefab_relink(args: Dictionary) -> Variant:
+	var id: int = int(args.get("id", -1))
+	var p: String = str(args.get("path", ""))
+	if p == "":
+		return _tool_error("path is required")
+	var res: VoxelModel = VoxelDocument.load_model_tolerant(p)
+	if res == null:
+		return _tool_error("not a VoxelModel: " + p)
+	var asset_id: String = str(args.get("asset_id", ""))
+	if asset_id == "":
+		asset_id = str(editor.catalog.asset_at(p).get("asset_id", ""))
+	var result: Dictionary = editor.doc.relink_prefab(id, res, p, asset_id)
+	if not result.get("ok", false):
+		return _prefab_error(result)
+	return _prefab_instance_payload(id, true)
+
+
+func _tool_prefab_reload(_args: Dictionary) -> Variant:
+	var result: Dictionary = editor.doc.refresh_prefabs()
+	editor.catalog.scan(editor.doc.path.get_base_dir())
+	if editor.catalog_dialog != null and editor.catalog_dialog.visible:
+		editor.catalog_dialog.refresh()
+	return result
+
+
+func _tool_prefab_get_state(_args: Dictionary) -> Variant:
+	var counts: Dictionary = editor.doc.prefab_status_counts()
+	var problems: Array = []
+	for inst: VoxelPrefabInstance in editor.doc.prefab_instances:
+		if inst == null:
+			continue
+		var st: Dictionary = editor.doc.prefab_status(inst.instance_id)
+		if str(st.get("state", "ok")) != "ok":
+			problems.append({"id": inst.instance_id, "state": st.get("state", ""),
+				"reason": st.get("reason", ""), "source_path": inst.source_path})
+	return {
+		"instances": editor.doc.prefab_instances.size(),
+		"cells": editor.doc.prefab_cell_count(),
+		"lights": editor.doc.prefab_light_count(),
+		"light_budget": editor.doc.prefab_light_budget,
+		"over_budget": editor.doc.prefab_light_budget_exceeded(),
+		"counts": counts,
+		"problems": problems,
+		"selected": editor.selected_prefab_id,
+		"armed_asset_id": editor.armed_asset_id,
+		"dirty": editor.doc.dirty,
+	}
+
+
+func _tool_get_composed_voxels(args: Dictionary) -> Variant:
+	var include: bool = bool(args.get("include_prefabs", true))
+	var cells := {}
+	for p: Vector3i in editor.doc.grid:
+		cells[p] = {"cell": [p.x, p.y, p.z],
+			"color": "#" + (editor.doc.grid[p] as Color).to_html(false), "prefab_id": 0}
+	if include:
+		for inst: VoxelPrefabInstance in editor.doc.prefab_instances:
+			if inst == null:
+				continue
+			for p: Vector3i in editor.doc.prefab_world_cells(inst.instance_id):
+				if cells.has(p):
+					continue
+				cells[p] = {"cell": [p.x, p.y, p.z],
+					"color": "#" + editor.doc.prefab_composition.color_at(p).to_html(false),
+					"prefab_id": inst.instance_id}
+	var out: Array = cells.values()
+	return {"voxels": out, "count": out.size(), "include_prefabs": include}
+
+
+func _prefab_instance_payload(id: int, verbose: bool = false) -> Dictionary:
+	var inst: VoxelPrefabInstance = editor.doc.prefab_instance(id)
+	if inst == null:
+		return {}
+	var st: Dictionary = editor.doc.prefab_status(id)
+	var b: AABB = editor.doc.prefab_bounds(id)
+	var payload: Dictionary = {
+		"id": id,
+		"asset_id": inst.asset_id,
+		"source_path": inst.source_path,
+		"source_resolved": inst.source != null,
+		"anchor": [inst.anchor.x, inst.anchor.y, inst.anchor.z],
+		"yaw": inst.yaw_quarters,
+		"yaw_degrees": inst.yaw_quarters * 90,
+		"pivot": [inst.pivot.x, inst.pivot.y, inst.pivot.z],
+		"status": str(st.get("state", "ok")),
+		"reason": str(st.get("reason", "")),
+		"cells": editor.doc.prefab_world_cells(id).size(),
+		"lights": editor.doc.prefab_world_lights(id).size(),
+		"bounds": _aabb_payload(b),
+	}
+	if verbose:
+		var sb: AABB = inst.source_bounds
+		payload["source_uid"] = inst.source_uid
+		payload["source_bounds"] = _aabb_payload(sb)
+		payload["placeholder_bounds"] = _aabb_payload(inst.placeholder_bounds())
+	return payload
+
+
+static func _aabb_payload(b: AABB) -> Dictionary:
+	return {"position": [b.position.x, b.position.y, b.position.z],
+		"size": [b.size.x, b.size.y, b.size.z]}
+
+
+## Document prefab failures carry a state and a human-readable reason. Keep the
+## state machine-readable and prefix the message with the failed action.
+static func _prefab_error(result: Dictionary) -> Dictionary:
+	var state: String = str(result.get("state", "error"))
+	return _tool_error("%s: %s" % [state, str(result.get("reason", "prefab operation refused"))])
+
+
 func _tool_add_swatch(args: Dictionary) -> Variant:
 	var c: Variant = _parse_color(args.get("color"))
 	if c == null:
@@ -710,6 +1057,13 @@ func _full_state() -> Dictionary:
 		"can_redo": editor.doc.can_redo(),
 		"stroking": editor._stroking,
 		"swatches": editor.doc.swatches.size(),
+		"prefab_instances": editor.doc.prefab_instances.size(),
+		"prefab_cells": editor.doc.prefab_cell_count(),
+		"prefab_lights": editor.doc.prefab_light_count(),
+		"prefab_light_budget": editor.doc.prefab_light_budget,
+		"prefab_over_budget": editor.doc.prefab_light_budget_exceeded(),
+		"prefab_counts": editor.doc.prefab_status_counts(),
+		"selected_prefab": editor.selected_prefab_id,
 		# 0 means unlimited (all chunks meshed), matching set_render_horizon.
 		"render_horizon": 0 if editor.render_horizon >= editor.UNLIMITED_HORIZON else editor.render_horizon,
 	}
@@ -733,7 +1087,7 @@ func _define_tools() -> Array[Dictionary]:
 		{"name": "get_voxels", "description": "Every voxel: cell [x,y,z] and hex color.", "inputSchema": {"type": "object", "properties": {}}},
 		{"name": "screenshot", "description": "Save the current window to a PNG; returns its path. Use to see what the user sees.", "inputSchema": {"type": "object", "properties": {}}},
 		{"name": "list_tools", "description": "Names of the editing tools.", "inputSchema": {"type": "object", "properties": {}}},
-		{"name": "set_tool", "description": "Select a tool: place, erase, paint, pick, box, box_erase, fill.", "inputSchema": {"type": "object", "properties": {"tool": {"type": "string", "enum": ["place", "erase", "paint", "pick", "box", "box_erase", "fill"]}}, "required": ["tool"]}},
+		{"name": "set_tool", "description": "Select a tool: place, erase, paint, pick, box, box_erase, fill, light, edit_light, prefab.", "inputSchema": {"type": "object", "properties": {"tool": {"type": "string", "enum": ["place", "erase", "paint", "pick", "box", "box_erase", "fill", "light", "edit_light", "prefab"]}}, "required": ["tool"]}},
 		{"name": "get_tool", "description": "Currently selected tool.", "inputSchema": {"type": "object", "properties": {}}},
 		{"name": "set_color", "description": "Set the active color.", "inputSchema": {"type": "object", "properties": {"color": color}, "required": ["color"]}},
 		{"name": "get_color", "description": "Active color as hex.", "inputSchema": {"type": "object", "properties": {}}},
@@ -775,4 +1129,21 @@ func _define_tools() -> Array[Dictionary]:
 		{"name": "set_light_handles", "description": "Show or hide light editing handles without changing illumination.", "inputSchema": {"type": "object", "properties": {"visible": {"type": "boolean"}}}},
 		{"name": "set_sun", "description": "Configure the scene's directional sun (saved with the model): energy (0..16, 0 = off), yaw/pitch in degrees, hex color, shadows. Give any subset.", "inputSchema": {"type": "object", "properties": {"energy": {"type": "number"}, "yaw": {"type": "number"}, "pitch": {"type": "number"}, "color": {"type": "string"}, "shadows": {"type": "boolean"}}}},
 		{"name": "add_swatch", "description": "Add a color to the palette.", "inputSchema": {"type": "object", "properties": {"color": color}, "required": ["color"]}},
+		{"name": "prefab_list_assets", "description": "List reusable prefab assets from the user and project libraries. Filter by library (all/user/project) and a case-insensitive search over name/path. Invalid sources are hidden unless include_invalid=true.", "inputSchema": {"type": "object", "properties": {"library": {"type": "string", "enum": ["all", "user", "project"]}, "search": {"type": "string"}, "include_invalid": {"type": "boolean"}}}},
+		{"name": "prefab_refresh_assets", "description": "Rescan the prefab libraries and return the asset summary. Explicit: the catalogue does not watch the filesystem.", "inputSchema": {"type": "object", "properties": {}}},
+		{"name": "prefab_get_asset", "description": "Details for one catalogue asset by asset_id or path: bounds, cells, lights, pivot, validity, and a cached thumbnail path when one exists.", "inputSchema": {"type": "object", "properties": {"asset_id": {"type": "string"}, "path": {"type": "string"}}}},
+		{"name": "prefab_set_pivot", "description": "Set a catalogue asset's custom pivot in source cell space (snapped to multiples of 0.5). Saved in the library manifest.", "inputSchema": {"type": "object", "properties": {"asset_id": {"type": "string"}, "path": {"type": "string"}, "pivot": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}}, "required": ["pivot"]}},
+		{"name": "prefab_reset_pivot", "description": "Reset a catalogue asset's pivot to its computed bottom-center default.", "inputSchema": {"type": "object", "properties": {"asset_id": {"type": "string"}, "path": {"type": "string"}}}},
+		{"name": "prefab_place", "description": "Place a linked instance of a catalogue asset (asset_id) or any VoxelModel file (path) at anchor [x,y,z]. yaw is quarter turns 0-3. The pivot defaults to the catalogue pivot. Refused on overlap, out of bounds, incompatible sources, or the soft light budget; pass allow_over_budget=true to override the budget only.", "inputSchema": {"type": "object", "properties": {"asset_id": {"type": "string"}, "path": {"type": "string"}, "anchor": cell, "yaw": {"type": "integer"}, "pivot": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}, "allow_over_budget": {"type": "boolean"}}, "required": ["anchor"]}},
+		{"name": "prefab_list_instances", "description": "Every linked instance with id, asset, source path, anchor, yaw, pivot, status, cell/light counts and bounds.", "inputSchema": {"type": "object", "properties": {}}},
+		{"name": "prefab_get_instance", "description": "Full details for one linked instance, including source bounds and placeholder bounds.", "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]}},
+		{"name": "prefab_move", "description": "Move a linked instance to a new anchor cell (integer translation). All-or-nothing: refused if any cell or light would overlap or leave the bounds.", "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}, "anchor": cell}, "required": ["id", "anchor"]}},
+		{"name": "prefab_rotate", "description": "Rotate a linked instance by delta quarter turns (default 1 = +90°). All-or-nothing like move.", "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}, "delta": {"type": "integer"}}}},
+		{"name": "prefab_duplicate", "description": "Duplicate a linked instance at a required anchor cell, copying asset, pivot, yaw and source. Refused on overlap or the soft light budget; allow_over_budget overrides the budget only.", "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}, "anchor": cell, "allow_over_budget": {"type": "boolean"}}, "required": ["id", "anchor"]}},
+		{"name": "prefab_delete", "description": "Delete a linked instance (one undo step).", "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]}},
+		{"name": "prefab_unpack", "description": "Convert a linked instance into editable voxels and lights atomically (one undo step). Refused if the parent's 32-light limit would be exceeded.", "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]}},
+		{"name": "prefab_relink", "description": "Point a missing/conflicted instance at a new VoxelModel file. Revalidates the whole instance atomically.", "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}, "path": {"type": "string"}, "asset_id": {"type": "string"}}, "required": ["id", "path"]}},
+		{"name": "prefab_reload", "description": "Reload every prefab source from disk and revalidate all instances, then rescan the catalogue. Not undoable and does not dirty the model.", "inputSchema": {"type": "object", "properties": {}}},
+		{"name": "prefab_get_state", "description": "Prefab summary: instance/cell/light counts, soft light budget, over-budget flag, status counts, and a problem list with reasons.", "inputSchema": {"type": "object", "properties": {}}},
+		{"name": "get_composed_voxels", "description": "Every voxel including linked prefab cells, each tagged with prefab_id (0 = local). include_prefabs=false matches get_voxels. Large scenes can return a lot of data.", "inputSchema": {"type": "object", "properties": {"include_prefabs": {"type": "boolean"}}}},
 	]

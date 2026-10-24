@@ -27,5 +27,16 @@ jobs:
       - name: VoxelModelEditor
         run: godot --headless --path . -s tests/voxel_editor_test.gd
 
+      - name: Prefab catalogue
+        run: godot --headless --path . -s tests/voxel_prefab_catalog_test.gd
+
+      - name: Prefab editor flow
+        run: godot --headless --path . -s tests/voxel_prefab_editor_test.gd
+
       - name: Editor input handling
         run: godot --headless --path . -s tests/voxel_editor_input_test.gd
+
+      - name: MCP server
+        env:
+          VOXDOT_MCP_PORT: "7851"
+        run: godot --headless --path . -s tests/mcp_server_test.gd

@@ -53,6 +53,7 @@ func _run() -> void:
 	await _shot_height_lock()
 	await _shot_box_tool()
 	await _shot_lighting()
+	await _shot_prefabs()
 	print("screenshots written to ", ProjectSettings.globalize_path(OUT_DIR))
 	quit()
 
@@ -157,6 +158,129 @@ func _shot_lighting() -> void:
 	_frame(Vector3(13, 6, 13), 40.0)
 	_ed.light_rig.update_handle_scales(_ed.camera)
 	await _grab("04-lighting.png")
+
+
+## --- Shot 5: linked prefab instances composed into a scene ---
+
+func _shot_prefabs() -> void:
+	_load_model(_build_meadow())
+	_ed._set_height_lock(false)
+	_ed._set_layer(0)
+	_ed.grid_visible = false
+	_ed._grid_mi.visible = false
+	# Sources live in a temp library so the shot is reproducible and never
+	# touches the user's real prefab library.
+	var lib: String = ProjectSettings.globalize_path("user://screenshot_prefabs")
+	DirAccess.make_dir_recursive_absolute(lib)
+	var pine := VoxelModel.from_grid(_build_pine())
+	pine.bounds = Vector3i(16, 16, 16)
+	var pine_path: String = lib.path_join("pine.tres")
+	ResourceSaver.save(pine, pine_path)
+	var cottage := VoxelModel.from_grid(_build_cottage())
+	cottage.bounds = Vector3i(16, 16, 16)
+	var cottage_path: String = lib.path_join("cottage.tres")
+	ResourceSaver.save(cottage, cottage_path)
+	var lamp := VoxelModel.from_grid(_build_lamp())
+	lamp.bounds = Vector3i(8, 8, 8)
+	lamp.lights = PackedFloat32Array([1, 0.5, 3.5, 0.5, 1.0, 0.82, 0.45, 2.4, 9.0, 1.0])
+	var lamp_path: String = lib.path_join("lamp.tres")
+	ResourceSaver.save(lamp, lamp_path)
+
+	var placed_ids: Array[int] = []
+	var cottages: Array = [
+		[Vector3i(6, 1, 6), 0],
+		[Vector3i(17, 1, 16), 1],
+	]
+	for entry: Array in cottages:
+		var res: Dictionary = _ed.doc.place_prefab(cottage, cottage_path, "cottage",
+			Vector3(4.0, 0.0, 3.0), entry[0], int(entry[1]))
+		if res.get("ok", false):
+			placed_ids.append(int(res["instance_id"]))
+	for anchor: Vector3i in [Vector3i(2, 1, 2), Vector3i(21, 1, 2),
+			Vector3i(2, 1, 21), Vector3i(22, 1, 22), Vector3i(12, 1, 21),
+			Vector3i(8, 1, 20)]:
+		var res: Dictionary = _ed.doc.place_prefab(pine, pine_path, "pine",
+			Vector3(1.5, 0.0, 1.5), anchor, 0)
+		if res.get("ok", false):
+			placed_ids.append(int(res["instance_id"]))
+	for anchor: Vector3i in [Vector3i(10, 1, 10), Vector3i(11, 1, 13),
+			Vector3i(10, 1, 18)]:
+		var res: Dictionary = _ed.doc.place_prefab(lamp, lamp_path, "lamp",
+			Vector3(0.5, 0.0, 0.5), anchor, 0)
+		if res.get("ok", false):
+			placed_ids.append(int(res["instance_id"]))
+	# Select a pine so the shot shows the selection outline and the inspector.
+	if placed_ids.size() > 6:
+		_ed.selected_prefab_id = placed_ids[6]
+	_ed._set_tool(VoxelModelEditor.Tool.PREFAB)
+	_ed._sync_prefab_rig()
+	# The chunk streamer throttles rebuilds while edits are recent; this is a
+	# one-shot composition, so force the dirty chunks to build now.
+	_ed._last_change_frame = -100000
+	_ed._rebuild_mesh()
+	# Make room for the Prefabs section in the side panel.
+	for section: String in ["Model", "Tool", "Color", "Sun", "Lighting", "View"]:
+		_set_section(section, false)
+	_set_section("Prefabs", true)
+	_ed._hover = {"valid": false}
+	_ed._update_ghost()
+	_ed._yaw = deg_to_rad(-38.0)
+	_ed._pitch = deg_to_rad(-26.0)
+	_frame(Vector3(12, 3, 12), 29.0)
+	await _grab("05-prefabs.png")
+
+
+## A grassy plot with a dirt path; prefab instances sit on top at y=1.
+func _build_meadow() -> Dictionary:
+	var g: Dictionary = {}
+	VoxelMeshBuilder.fill_box(g, Vector3i(0, 0, 0), Vector3i(24, 1, 24), C_GRASS)
+	for i in range(24):
+		g[Vector3i(11, 0, i)] = C_DIRT
+		g[Vector3i(12, 0, i)] = C_DIRT
+	return g
+
+
+## A small cottage: stone walls, wooden door, pitched roof and a chimney.
+func _build_cottage() -> Dictionary:
+	var g: Dictionary = {}
+	VoxelMeshBuilder.fill_box(g, Vector3i(1, 0, 1), Vector3i(7, 3, 5), C_STONE)
+	VoxelMeshBuilder.fill_box(g, Vector3i(2, 0, 2), Vector3i(5, 3, 3), C_STONE_LIGHT)
+	VoxelMeshBuilder.fill_box(g, Vector3i(1, 0, 1), Vector3i(7, 1, 5), C_STONE_DARK)
+	# Door and windows sit flush in the front wall (z=1).
+	VoxelMeshBuilder.fill_box(g, Vector3i(4, 0, 1), Vector3i(1, 2, 1), C_WOOD)
+	g[Vector3i(2, 2, 1)] = C_GLASS
+	g[Vector3i(6, 2, 1)] = C_GLASS
+	# Pitched roof: shrinking courses with a one-voxel overhang.
+	for i in 3:
+		var w: int = 9 - i * 2
+		VoxelMeshBuilder.fill_box(g, Vector3i(0 + i, 3 + i, 0), Vector3i(w, 1, 7), C_ROOF if i % 2 == 0 else C_ROOF_DARK)
+	VoxelMeshBuilder.fill_box(g, Vector3i(6, 4, 2), Vector3i(1, 3, 1), C_STONE_DARK)
+	return g
+
+
+
+## A small conical pine: a three-voxel trunk with three foliage tiers.
+func _build_pine() -> Dictionary:
+	var g: Dictionary = {}
+	for y in 3:
+		g[Vector3i(1, y, 1)] = C_WOOD_DARK
+	for x in 3:
+		for z in 3:
+			g[Vector3i(x, 3, z)] = C_MOSS if (x + z) % 2 == 0 else C_GRASS
+	for p: Vector3i in [Vector3i(1, 4, 0), Vector3i(0, 4, 1), Vector3i(1, 4, 1),
+			Vector3i(2, 4, 1), Vector3i(1, 4, 2)]:
+		g[p] = C_GRASS
+	g[Vector3i(1, 5, 1)] = C_MOSS
+	return g
+
+
+## A lamp post with a warm head; the light itself is part of the prefab.
+func _build_lamp() -> Dictionary:
+	var g: Dictionary = {}
+	for y in 3:
+		g[Vector3i(0, y, 0)] = C_WOOD_DARK
+	g[Vector3i(0, 3, 0)] = C_FIRE
+	return g
 
 
 ## Expands/collapses a side-panel section by name.

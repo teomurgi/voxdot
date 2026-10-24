@@ -13,7 +13,21 @@ extends RefCounted
 
 
 static func cast(grid: Dictionary, bounds: Vector3i, origin: Vector3, dir: Vector3) -> Dictionary:
-	var result: Dictionary = {"hit": false, "floor": false, "pos": Vector3i.ZERO, "normal": Vector3i.ZERO}
+	return _cast(grid, null, bounds, origin, dir)
+
+
+## Traversal over local voxels plus linked prefab cells. Local cells win when
+## both exist (defensive; the editor forbids overlap). Adds `prefab_id` (0 for
+## local, instance ID for prefab, -1 when nothing was hit) and `color`.
+static func cast_composed(local_grid: Dictionary, composition, bounds: Vector3i,
+		origin: Vector3, dir: Vector3) -> Dictionary:
+	return _cast(local_grid, composition, bounds, origin, dir)
+
+
+static func _cast(grid: Dictionary, composition, bounds: Vector3i,
+		origin: Vector3, dir: Vector3) -> Dictionary:
+	var result: Dictionary = {"hit": false, "floor": false, "pos": Vector3i.ZERO,
+		"normal": Vector3i.ZERO, "prefab_id": -1, "color": Color.WHITE}
 	var bmax := Vector3(bounds)
 
 	# Slab test against the bounds box; remember which axis we entered through.
@@ -66,6 +80,15 @@ static func cast(grid: Dictionary, bounds: Vector3i, origin: Vector3, dir: Vecto
 			result["hit"] = true
 			result["pos"] = cell
 			result["normal"] = normal
+			result["prefab_id"] = 0
+			result["color"] = grid[cell]
+			return result
+		if composition != null and composition.has_cell(cell):
+			result["hit"] = true
+			result["pos"] = cell
+			result["normal"] = normal
+			result["prefab_id"] = composition.owner_at(cell)
+			result["color"] = composition.color_at(cell)
 			return result
 		var axis: int = 0
 		if t_max.y < t_max.x and t_max.y <= t_max.z:

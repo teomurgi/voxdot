@@ -3,8 +3,12 @@
 
 The scene is a compact, raised diorama: curved ceramic roofs, vermilion timber,
 shoji panels, balcony rails, a stone garden, koi pond, arched bridge, lanterns,
-and four cherry trees. Geometry is grouped by render chunk before streaming so
-that each place_voxels call normally dirties only one editor mesh chunk.
+and four cherry trees. One tree is a reusable prefab: the script first saves
+`Prefabs/cherry_tree.tres`, then places a linked instance in the garden. The
+other three trees are ordinary local voxels.
+
+Geometry is grouped by render chunk before streaming so that each place_voxels
+call normally dirties only one editor mesh chunk.
 
 Run against a fresh, empty editor:
     VOXDOT_MCP_PORT=7850 python3 tools/build_pagoda_512.py
@@ -13,16 +17,24 @@ import json
 import math
 import os
 import random
+import shutil
 import time
 import urllib.request
 
 PORT = int(os.environ.get("VOXDOT_MCP_PORT", "7850"))
 OUTPUT = os.environ.get("VOXDOT_PAGODA_OUTPUT", os.path.expanduser("~/Documents/Voxdot/pagoda_demo_512.tres"))
+OUTPUT_PNG = os.path.splitext(OUTPUT)[0] + ".png"
 B = 512
 CX = 256
 CZ = 224
 GROUND = 8
+PREFAB_DIR = os.path.join(os.path.dirname(OUTPUT), "Prefabs")
+TREE_PREFAB = os.path.join(PREFAB_DIR, "cherry_tree.tres")
+TREE_PREFAB_ARGS = (146, 164, 44, 27)
+TREE_PREFAB_MARGIN = 32
+TREE_PREFAB_BOUNDS = 128
 _rng = random.Random(512042)
+_emit_origin = None
 _rpc_id = 0
 
 
@@ -83,6 +95,14 @@ _stage = {}
 
 
 def emit(x, y, z, color):
+    if _emit_origin is not None:
+        ox, oy, oz = _emit_origin
+        x, y, z = x - ox, y - oy, z - oz
+        # Root flares dip one cell below the garden surface in the full scene.
+        # A prefab may not contain cells below y=0, and those cells would be
+        # hidden inside the ground anyway, so drop them in prefab mode.
+        if y < 0:
+            return
     p = (int(x), int(y), int(z))
     if not (0 <= p[0] < B and 0 <= p[1] < B and 0 <= p[2] < B):
         raise ValueError(f"voxel outside 512^3: {p}")
@@ -550,11 +570,56 @@ def cherry_tree(x, z, trunk_height, spread):
                 emit(xx, GROUND + 1, zz, _rng.choice(PINK[1:]))
 
 
-def build_trees():
+def build_trees(tree_asset):
     for args in ((146, 164, 44, 27), (366, 158, 54, 30),
                  (374, 286, 42, 25), (142, 348, 34, 22)):
+        if args == TREE_PREFAB_ARGS:
+            continue
         cherry_tree(*args)
-    flush("four flowering cherry trees")
+    flush("three flowering cherry trees")
+    place_tree_prefab(tree_asset)
+
+
+## Saves one cherry tree as a standalone prefab source. Cells are shifted by
+## TREE_PREFAB_MARGIN so the trunk's centre column sits at local (32, 0, 32);
+## that local cell is the pivot used when the prefab is placed in the garden.
+def build_tree_prefab():
+    global _emit_origin
+    os.makedirs(PREFAB_DIR, exist_ok=True)
+    call("new_model")
+    call("set_bounds", {"bounds": [TREE_PREFAB_BOUNDS] * 3})
+    call("set_mirror", {"x": False, "z": False})
+    call("set_height_lock", {"on": False})
+    x, z, trunk_height, spread = TREE_PREFAB_ARGS
+    _emit_origin = (x - TREE_PREFAB_MARGIN, GROUND + 1, z - TREE_PREFAB_MARGIN)
+    try:
+        cherry_tree(x, z, trunk_height, spread)
+        flush("prefab cherry tree")
+    finally:
+        _emit_origin = None
+    saved = call("save", {"path": TREE_PREFAB})
+    print("Saved prefab source:", saved, flush=True)
+    print("Catalogue:", call("prefab_refresh_assets"), flush=True)
+    asset = call("prefab_get_asset", {"path": TREE_PREFAB})
+    if not asset.get("valid"):
+        raise RuntimeError(f"prefab source is not valid: {asset}")
+    print("Prefab asset:", asset["asset_id"], asset["cells"], "cells", flush=True)
+    return asset
+
+
+## Places the prefab tree at its original garden position. The source pivot is
+## the min corner of local cell (32, 0, 32), so the anchor is the original
+## trunk-base cell.
+def place_tree_prefab(asset):
+    x, z, _trunk_height, _spread = TREE_PREFAB_ARGS
+    result = call("prefab_place", {
+        "asset_id": asset["asset_id"],
+        "anchor": [x, GROUND + 1, z],
+        "pivot": [TREE_PREFAB_MARGIN, 0, TREE_PREFAB_MARGIN],
+    })
+    if result.get("status") != "ok":
+        raise RuntimeError(f"prefab tree placement failed: {result}")
+    print("Placed linked cherry tree:", result, flush=True)
 
 
 def shrub(x, z, radius=5):
@@ -594,7 +659,9 @@ def main():
     state = call("get_state")
     if state["voxel_count"] != 0 or state.get("dirty"):
         raise RuntimeError("Refusing to replace a non-empty or unsaved document; open a fresh model first")
-    print("Creating fresh 512 x 512 x 512 document through MCP", flush=True)
+    print("Saving the cherry-tree prefab source first", flush=True)
+    tree_asset = build_tree_prefab()
+    print("Creating fresh 512 x 512 x 512 parent document through MCP", flush=True)
     call("new_model")
     call("set_bounds", {"bounds": [B, B, B]})
     call("set_mirror", {"x": False, "z": False})
@@ -605,7 +672,7 @@ def main():
     build_bridge()
     build_pond_details()
     build_lanterns()
-    build_trees()
+    build_trees(tree_asset)
     build_garden_details()
 
     call("set_grid_visible", {"visible": False})
@@ -617,11 +684,23 @@ def main():
     # Let the final cooldown-bound chunk rebuilds finish before saving/capture.
     time.sleep(3)
     state = call("get_state")
-    print(f"Final document: {state['voxel_count']:,} voxels, bounds {state['bounds']}", flush=True)
+    print(f"Final document: {state['voxel_count']:,} local voxels, bounds {state['bounds']}", flush=True)
+    print(f"Linked prefabs: {state['prefab_instances']} instance(s), "
+          f"{state['prefab_cells']:,} composed cells, status {state['prefab_counts']}", flush=True)
     if state["bounds"] != [B, B, B]:
         raise RuntimeError(f"wrong final bounds: {state['bounds']}")
+    if state["prefab_instances"] != 1 or state["prefab_cells"] == 0:
+        raise RuntimeError(f"prefab tree was not placed: {state}")
+    if int(state["prefab_counts"].get("ok", 0)) != 1:
+        raise RuntimeError(f"prefab tree is not valid: {state['prefab_counts']}")
     print("Saved:", call("save", {"path": OUTPUT}), flush=True)
-    print("Screenshot:", call("screenshot"), flush=True)
+    shot = call("screenshot")
+    shot_path = str(shot.get("path", ""))
+    if shot_path and os.path.isfile(shot_path):
+        shutil.copyfile(shot_path, OUTPUT_PNG)
+        print("Screenshot copied to:", OUTPUT_PNG, flush=True)
+    else:
+        print("Screenshot:", shot, flush=True)
     print("DONE", flush=True)
 
 
