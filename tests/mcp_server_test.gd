@@ -319,6 +319,25 @@ func _run() -> void:
 	_check(other_list["count"] == 1,
 		"prefab_list_assets rescans after the model moves: " + str(other_list))
 
+	print("character rig over MCP")
+	var tools2: Dictionary = await _rpc("tools/list")
+	var tool_names: Array = ((tools2.get("result", {}) as Dictionary).get("tools", []) as Array).map(func(t: Dictionary) -> String: return str(t["name"]))
+	for expect: String in ["character_get_state", "character_set_preset", "character_set_slot", "character_set_anim_state", "character_play_attack"]:
+		_check(tool_names.has(expect), "advertises %s" % expect)
+	var cstate: Dictionary = (await _call("character_get_state"))["_payload"]
+	_check(cstate["preset"] == 0 and cstate["preset_name"] == "Warrior", "rig defaults to Warrior: " + str(cstate))
+	_check((await _call("character_set_preset", {"preset": 1}))["_payload"]["preset_name"] == "Barbarian", "character_set_preset barbarian")
+	var cslot: Dictionary = await _call("character_set_slot", {"slot": "main_hand", "path": src_path})
+	_check(cslot["_ok"] and str(_ed.doc.character_slots.get("main_hand", "")) == src_path, "character_set_slot assigns saved model")
+	var cafter: Dictionary = (await _call("character_get_state"))["_payload"]
+	_check(str((cafter["slot_models"] as Dictionary).get("main_hand", "")) == src_path, "character_get_state echoes slot path")
+	_check((await _call("character_set_anim_state", {"state": "walk"}))["_payload"]["anim_state"] == "walk", "character_set_anim_state walk")
+	_check((await _call("character_play_attack"))["_ok"], "character_play_attack")
+	_check((await _call("character_set_slot", {"slot": "bogus", "index": 1}))["_ok"] == false, "bad character slot rejected")
+	_check((await _call("character_set_preset", {"preset": 9}))["_ok"] == false, "bad character preset rejected")
+	_check((await _call("character_set_slot", {"slot": "main_hand", "path": ""}))["_ok"], "character slot cleared")
+	_check(not _ed.doc.character_slots.has("main_hand"), "cleared slot leaves the document")
+
 	print("screenshot")
 	var shot: Dictionary = await _call("screenshot")
 	# Headless has no real viewport texture; on a live window this returns a PNG path.

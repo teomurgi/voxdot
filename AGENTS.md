@@ -172,6 +172,15 @@ Standalone voxel model editor on **Godot 4.7.2** (system binary `/usr/bin/godot`
     with a 1-cell skirt, slope fill never rises above a reserved neighbour (`emit_terrain_band`), and pads
     must not overlap with different tops (`reserve_at` returns the first match — a lower yard pad overlapping
     a higher cabin pad buries the yard instance). All-or-nothing placement refuses any overlap, so validate
-    footprints offline (local cells + pivot/yaw math) before the long MCP build. `open()` resets the editor
     camera, so builder scripts must re-apply hero framing (and wait for chunk rebuilds) after the reload check
     before capturing the shipped screenshot — otherwise the PNG is a black frame.
+23. **Character editor port** (`voxel_character_parts.gd`, `voxel_character_rig.gd`): verbatim logic port of
+    rpg-forge's `VoxelPartLibrary`/`ModularCharacterRig` with renames only (`VoxelCharacterParts`,
+    `VoxelCharacterRig`; the 13-bone rig has no root bone, `hips` is the root — 14 was a wrong guess). Don't
+    alias a class_name in a `const` (`const PARTS = VoxelCharacterParts` is not a constant expression); call
+    the class directly. GDScript has no dict comprehensions in literals. The `CHARACTER` tool is on `K`, not
+    `C` — `C` is fly-down in WASD navigation (polled in `_update_navigation`). Slot models persist as paths
+    in `VoxelModel.character_slots` / `VoxelDocument.character_slots` (external-reference pattern like
+    prefabs, never embedded); the rig's `slot_models` holds the loaded models. Nesting refused like prefab
+    sources. The rig's export defaults are the Warrior preset; a fresh `character_get_state` reports
+    preset 0, not -1.

@@ -1102,6 +1102,88 @@ func _tool_prefab_get_state(_args: Dictionary) -> Variant:
 	}
 
 
+const CHARACTER_SLOTS: Array[String] = ["helmet", "chest", "main_hand", "off_hand"]
+
+
+func _character_state_payload() -> Dictionary:
+	var rig: VoxelCharacterRig = editor.character_rig
+	var models: Dictionary = {}
+	for k: Variant in editor.doc.character_slots:
+		models[str(k)] = str(editor.doc.character_slots[k])
+	return {
+		"preset": rig.current_preset,
+		"preset_name": str(VoxelCharacterRig.PRESETS[rig.current_preset][&"name"]) if rig.current_preset >= 0 else "",
+		"slots": {
+			"helmet": int(rig.current.get(&"helmet", 0)),
+			"chest": int(rig.current.get(&"chest", 0)),
+			"main_hand": int(rig.current.get(&"main_hand", 0)),
+			"off_hand": int(rig.current.get(&"off_hand", 0)),
+		},
+		"slot_models": models,
+		"anim_state": ["idle", "walk", "run"][clampi(int(rig.state), 0, 2)],
+		"attacking": rig.is_attacking(),
+		"dirty": editor.doc.dirty,
+	}
+
+
+func _tool_character_get_state(_args: Dictionary) -> Variant:
+	return _character_state_payload()
+
+
+func _tool_character_set_preset(args: Dictionary) -> Variant:
+	var rig: VoxelCharacterRig = editor.character_rig
+	var idx: int = int(args.get("preset", args.get("preset_index", 0)))
+	if idx < 0 or idx >= VoxelCharacterRig.PRESETS.size():
+		return _tool_error("preset must be 0..%d" % (VoxelCharacterRig.PRESETS.size() - 1))
+	rig.apply_preset(idx)
+	editor._refresh_character_ui()
+	return _character_state_payload()
+
+
+func _tool_character_set_slot(args: Dictionary) -> Variant:
+	var slot: String = str(args.get("slot", ""))
+	if not CHARACTER_SLOTS.has(slot):
+		return _tool_error("slot must be one of " + ", ".join(CHARACTER_SLOTS))
+	if args.has("index"):
+		var rig: VoxelCharacterRig = editor.character_rig
+		var count: int = int(VoxelCharacterRig.SWAP_COUNTS.get(StringName(slot), 1))
+		var idx: int = clampi(int(args["index"]), 0, count - 1)
+		if slot == "chest":
+			rig.set_armor_style(idx)
+		else:
+			rig.set_equipment(StringName(slot), idx)
+		editor._refresh_character_ui()
+		return _character_state_payload()
+	if not args.has("path"):
+		return _tool_error("path or index is required")
+	var p: String = str(args["path"])
+	if p.strip_edges().is_empty():
+		editor.character_rig.set_slot_model(StringName(slot), "")
+		editor.doc.set_character_slot(slot, "")
+		editor._refresh_character_ui()
+		return _character_state_payload()
+	var err: String = editor.character_rig.set_slot_model(StringName(slot), p)
+	if err != "":
+		return _tool_error(err)
+	editor.doc.set_character_slot(slot, p)
+	editor._refresh_character_ui()
+	return _character_state_payload()
+
+
+func _tool_character_set_anim_state(args: Dictionary) -> Variant:
+	var name: String = str(args.get("state", "idle")).to_lower()
+	var ids: Dictionary = {"idle": 0, "walk": 1, "run": 2}
+	if not ids.has(name):
+		return _tool_error("state must be one of idle, walk, run")
+	editor._set_character_anim_state(int(ids[name]))
+	return _character_state_payload()
+
+
+func _tool_character_play_attack(_args: Dictionary) -> Variant:
+	editor._play_character_attack()
+	return _character_state_payload()
+
+
 func _tool_get_composed_voxels(args: Dictionary) -> Variant:
 	var include: bool = bool(args.get("include_prefabs", true))
 	var cells := {}
@@ -1302,5 +1384,9 @@ func _define_tools() -> Array[Dictionary]:
 		{"name": "prefab_relink", "description": "Point a missing/conflicted instance at a new VoxelModel file. Revalidates the whole instance atomically.", "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}, "path": {"type": "string"}, "asset_id": {"type": "string"}}, "required": ["id", "path"]}},
 		{"name": "prefab_reload", "description": "Reload every prefab source from disk and revalidate all instances, then rescan the catalogue. Not undoable and does not dirty the model.", "inputSchema": {"type": "object", "properties": {}}},
 		{"name": "prefab_get_state", "description": "Prefab summary: instance/cell/light counts, soft light budget, over-budget flag, status counts, and a problem list with reasons.", "inputSchema": {"type": "object", "properties": {}}},
-		{"name": "get_composed_voxels", "description": "Every voxel including linked prefab cells, each tagged with prefab_id (0 = local). include_prefabs=false matches get_voxels. Large scenes can return a lot of data.", "inputSchema": {"type": "object", "properties": {"include_prefabs": {"type": "boolean"}}}},
+		{"name": "character_get_state", "description": "Character rig state: current preset, slot indices, saved-model slot paths, animation state, attack status.", "inputSchema": {"type": "object", "properties": {}}},
+		{"name": "character_set_preset", "description": "Apply a class preset (0=Warrior, 1=Barbarian, 2=Cultist, 3=Brigand, 4=Villager) to the live rig. Rewrites the four slot indices; slot model paths are untouched.", "inputSchema": {"type": "object", "properties": {"preset": {"type": "integer", "minimum": 0, "maximum": 4}}}},
+		{"name": "character_set_slot", "description": "Set one character part slot (helmet, chest, main_hand, off_hand): either a procedural index, or a saved-model path that overrides it. Empty path clears back to procedural. Saved-model sources containing prefab instances are refused.", "inputSchema": {"type": "object", "properties": {"slot": {"type": "string", "enum": ["helmet", "chest", "main_hand", "off_hand"]}, "index": {"type": "integer"}, "path": {"type": "string"}}, "required": ["slot"]}},
+		{"name": "character_set_anim_state", "description": "Preview a locomotion state on the live rig: idle, walk, or run.", "inputSchema": {"type": "object", "properties": {"state": {"type": "string", "enum": ["idle", "walk", "run"]}}}},
+		{"name": "character_play_attack", "description": "Play one attack swing on the live rig (upper/lower body split keeps the legs moving).", "inputSchema": {"type": "object", "properties": {}}},
 	]

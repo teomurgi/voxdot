@@ -85,9 +85,11 @@ var dirty: bool = false
 ## `prefab_composition` is a derived spatial index kept in sync by every
 ## mutating method below.
 var prefab_instances: Array[VoxelPrefabInstance] = []
-## Soft editor warning threshold for instance lights, saved with the parent.
 var prefab_light_budget: int = 64
 var prefab_composition: VoxelPrefabComposition = VoxelPrefabComposition.new()
+## Character part slot overrides (slot name -> saved-model path), saved in the
+## model but not undoable (like mirror flags and scene mood).
+var character_slots: Dictionary = {}
 
 var _undo_stack: Array[Dictionary] = []
 var _redo_stack: Array[Dictionary] = []
@@ -655,7 +657,23 @@ func set_prefab_light_budget(value: int) -> bool:
 	var b: int = clampi(value, 0, 4096)
 	if b == prefab_light_budget:
 		return false
-	prefab_light_budget = b
+	dirty = true
+	meta_changed.emit()
+	return true
+
+
+## Sets (or clears with an empty path) a character part slot override. Saved
+## with the model, not undoable. Returns false when unchanged.
+func set_character_slot(slot: String, model_path: String) -> bool:
+	var trimmed: String = model_path.strip_edges()
+	if trimmed.is_empty():
+		if not character_slots.has(slot):
+			return false
+		character_slots.erase(slot)
+	else:
+		if str(character_slots.get(slot, "")) == trimmed:
+			return false
+		character_slots[slot] = trimmed
 	dirty = true
 	meta_changed.emit()
 	return true
@@ -1178,6 +1196,7 @@ func reset() -> void:
 	prefab_instances.clear()
 	prefab_composition.clear()
 	prefab_light_budget = 64
+	character_slots.clear()
 	_undo_stack.clear()
 	_redo_stack.clear()
 	_stroke = {}
@@ -1216,6 +1235,7 @@ func to_model() -> VoxelModel:
 		if inst != null:
 			saved.append(inst.copy_for_save())
 	m.prefab_instances = saved
+	m.character_slots = character_slots.duplicate()
 	m.set_cells(grid, cell_materials, cell_overrides)
 	return m
 
@@ -1286,6 +1306,7 @@ func load_model(m: VoxelModel, source_path: String = "") -> int:
 		if inst != null:
 			prefab_instances.append(inst.copy_for_save())
 	prefab_light_budget = clampi(m.prefab_light_budget, 0, 4096)
+	character_slots = (m.character_slots as Dictionary).duplicate() if m.character_slots != null else {}
 	_next_prefab_id = 1
 	_recompute_next_prefab_id()
 	_reload_instance_sources(source_path.get_base_dir())

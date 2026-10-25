@@ -7,15 +7,15 @@ extends Node3D
 ## tools, hover preview and UI.
 ##
 ## Controls: LMB tool | MMB/RMB orbit | Shift+MMB/RMB pan | wheel zoom
-## 1-9 tools, 0 Prefab, M Material | H height lock, [ ] layer down/up | X/Z mirror | Q/E rotate view | P ortho | G grid | F reframe
+## 1-9 tools, 0 Prefab, M Material, K Character | H height lock, [ ] layer down/up | X/Z mirror | Q/E rotate view | P ortho | G grid | F reframe
 ## B catalogue | R rotate prefab | Ctrl+D duplicate prefab | Delete prefab/light | Esc cancel
 ## Ctrl+Z / Ctrl+Shift+Z undo/redo | Ctrl+N/O/S new/open/save (+Shift = save as)
 
 ## PREFAB is appended (not first) so the existing 1–9 shortcuts keep their
-## tool; the Prefab tool itself is on `0`.
-enum Tool { PLACE, ERASE, PAINT, PICK, BOX, BOX_ERASE, FILL, LIGHT_PLACE, LIGHT_EDIT, PREFAB, MATERIAL }
+## tool; the Prefab tool itself is on `0`. MATERIAL is on `M`, CHARACTER on `K` (C is fly-down).
+enum Tool { PLACE, ERASE, PAINT, PICK, BOX, BOX_ERASE, FILL, LIGHT_PLACE, LIGHT_EDIT, PREFAB, MATERIAL, CHARACTER }
 
-const TOOL_NAMES: Array[String] = ["Place", "Erase", "Paint", "Pick", "Box", "Box Erase", "Fill", "Light", "Edit Light", "Prefab", "Material"]
+const TOOL_NAMES: Array[String] = ["Place", "Erase", "Paint", "Pick", "Box", "Box Erase", "Fill", "Light", "Edit Light", "Prefab", "Material", "Character"]
 const TOOL_HINTS: Array[String] = [
 	"Click/drag to add voxels",
 	"Click/drag to remove voxels",
@@ -28,6 +28,7 @@ const TOOL_HINTS: Array[String] = [
 	"Click a light handle to select it; drag to move it; Delete removes it",
 	"Click an instance to select; drag to move; R rotate; Ctrl+D duplicate; B catalogue",
 	"Click/drag to apply the active material and overrides",
+	"Pick a preset, assign saved-model parts, preview animations on the live rig",
 ]
 const APP_TITLE: String = "Voxdot"
 const LEFT_PANEL_WIDTH: int = 264
@@ -65,6 +66,14 @@ var armed_source: VoxelModel
 var armed_pivot: Vector3 = Vector3.ZERO
 var armed_yaw: int = 0
 var prefab_rig: VoxelPrefabRig
+
+# --- Character ---
+## Live preview rig for the Character tool (hidden unless CHARACTER active).
+var character_rig: VoxelCharacterRig
+var _character_preset_option: OptionButton
+var _character_slot_edits: Dictionary = {}  # slot StringName -> LineEdit
+var _character_anim_label: Label
+var _character_file_slot: StringName = &""
 var catalog := VoxelPrefabCatalog.new()
 var catalog_dialog: VoxelPrefabCatalogDialog
 var _drag_prefab_id: int = -1
@@ -300,6 +309,11 @@ func _build_world() -> void:
 	prefab_rig = VoxelPrefabRig.new()
 	prefab_rig.name = "PrefabRig"
 	add_child(prefab_rig)
+
+	character_rig = VoxelCharacterRig.new()
+	character_rig.name = "CharacterRig"
+	add_child(character_rig)
+	character_rig.visible = false
 
 	camera = Camera3D.new()
 	camera.name = "Camera3D"
@@ -1535,6 +1549,130 @@ func _build_prefab_ui(parent: VBoxContainer) -> void:
 	_refresh_prefab_ui()
 
 
+func _build_character_ui(parent: VBoxContainer) -> void:
+	var body := _section(parent, "Character", false)
+	body.add_child(_label("Preset"))
+	_character_preset_option = OptionButton.new()
+	_character_preset_option.focus_mode = Control.FOCUS_NONE
+	_character_preset_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	for i in VoxelCharacterRig.PRESETS.size():
+		_character_preset_option.add_item(str(VoxelCharacterRig.PRESETS[i][&"name"]), i)
+	_character_preset_option.item_selected.connect(_on_character_preset_selected)
+	body.add_child(_character_preset_option)
+	body.add_child(_label("Part models (saved .tres, empty = procedural)"))
+	for slot: StringName in [&"helmet", &"chest", &"main_hand", &"off_hand"]:
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 4)
+		body.add_child(row)
+		var tag := _label(str(slot).capitalize().replace("_", " "))
+		tag.custom_minimum_size = Vector2(78, 0)
+		row.add_child(tag)
+		var path_edit := LineEdit.new()
+		path_edit.placeholder_text = "procedural"
+		path_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		path_edit.focus_mode = Control.FOCUS_CLICK
+		var captured: StringName = slot
+		path_edit.text_submitted.connect(func(t: String) -> void: _on_character_slot_committed(captured, t))
+		row.add_child(path_edit)
+		_character_slot_edits[slot] = path_edit
+		var browse := _button("...", func() -> void: _ask_character_slot_file(slot))
+		browse.tooltip_text = "Choose a saved .tres part model for %s" % str(slot)
+		browse.custom_minimum_size = Vector2(30, 0)
+		row.add_child(browse)
+		var clear := _button("x", func() -> void: _on_character_slot_committed(slot, ""))
+		clear.tooltip_text = "Back to procedural %s" % str(slot)
+		clear.custom_minimum_size = Vector2(30, 0)
+		row.add_child(clear)
+	body.add_child(_label("Animation"))
+	var anim_row := HBoxContainer.new()
+	anim_row.add_theme_constant_override("separation", 4)
+	body.add_child(anim_row)
+	for entry: Array in [["Idle", 0], ["Walk", 1], ["Run", 2]]:
+		var label_text: String = entry[0]
+		var state_id: int = entry[1]
+		var b := _button(label_text, func() -> void: _set_character_anim_state(state_id))
+		b.tooltip_text = "Preview %s on the live rig" % label_text
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		anim_row.add_child(b)
+	var attack := _button("Attack", _play_character_attack)
+	attack.tooltip_text = "Play one attack swing on the live rig"
+	attack.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	anim_row.add_child(attack)
+	_character_anim_label = _label("Idle")
+	_character_anim_label.add_theme_font_size_override("font_size", 12)
+	body.add_child(_character_anim_label)
+	_refresh_character_ui()
+
+
+## Applies a class preset to the live rig (rewrites the slot indices behind a
+## guard like the rig's own Inspector path). Slot model paths are untouched.
+func _on_character_preset_selected(index: int) -> void:
+	if character_rig == null:
+		return
+	character_rig.apply_preset(int(_character_preset_option.get_item_id(index)))
+	_character_anim_label.text = "Preset: %s" % str(VoxelCharacterRig.PRESETS[character_rig.current_preset][&"name"])
+
+
+## Commits a slot model path: loads the model, refuses nesting, stores the
+## path on both the document (saved) and the live rig (displayed).
+func _on_character_slot_committed(slot: StringName, model_path: String) -> void:
+	if character_rig == null:
+		return
+	var trimmed: String = model_path.strip_edges()
+	if trimmed.is_empty():
+		character_rig.set_slot_model(slot, "")
+		doc.set_character_slot(str(slot), "")
+		_refresh_character_ui()
+		_say("Character %s: procedural" % str(slot))
+		return
+	var err: String = character_rig.set_slot_model(slot, trimmed)
+	if err != "":
+		_say(err)
+		_refresh_character_ui()
+		return
+	doc.set_character_slot(str(slot), trimmed)
+	_refresh_character_ui()
+	_say("Character %s: %s" % [str(slot), trimmed.get_file()])
+
+
+func _ask_character_slot_file(slot: StringName) -> void:
+	if _file_dialog == null:
+		return
+	_character_file_slot = slot
+	_file_dialog.title = "Choose %s part model" % str(slot)
+	_file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	_file_dialog.filters = PackedStringArray(["*.tres, *.res ; Voxel Model"])
+	if doc.path != "":
+		_file_dialog.current_dir = doc.path.get_base_dir()
+	_file_dialog.popup_centered()
+
+
+func _set_character_anim_state(state_id: int) -> void:
+	if character_rig == null:
+		return
+	character_rig.set_anim_state(state_id as VoxelCharacterRig.AnimState)
+	_character_anim_label.text = ["Idle", "Walk", "Run"][clampi(state_id, 0, 2)]
+
+
+func _play_character_attack() -> void:
+	if character_rig == null:
+		return
+	character_rig.play_attack()
+	_character_anim_label.text = "Attack"
+
+
+func _refresh_character_ui() -> void:
+	if _character_preset_option == null:
+		return
+	_syncing_ui = true
+	if character_rig != null:
+		_character_preset_option.select(maxi(character_rig.current_preset, 0))
+	for slot: Variant in _character_slot_edits:
+		var edit: LineEdit = _character_slot_edits[slot]
+		edit.text = str(doc.character_slots.get(str(slot), character_rig.slot_model_paths.get(slot, "")))
+	_syncing_ui = false
+
+
 # --- Prefabs ---
 
 ## Opens the visual catalogue. Scanning is lazy: the editor itself never scans
@@ -2156,6 +2294,10 @@ func _handle_key(k: InputEventKey) -> bool:
 			if _text_field_focused():
 				return false
 			_set_tool(Tool.MATERIAL)
+		KEY_K:
+			if _text_field_focused():
+				return false
+			_set_tool(Tool.CHARACTER)
 		KEY_B:
 			if _text_field_focused():
 				return false
@@ -2211,6 +2353,9 @@ func _set_tool(t: Tool) -> void:
 		prefab_rig.hide_ghost()
 		if selected_prefab_id >= 0:
 			_select_prefab(-1)
+	if character_rig != null:
+		character_rig.visible = (t == Tool.CHARACTER)
+		character_rig.set_process(t == Tool.CHARACTER)
 
 
 func _set_color(c: Color) -> void:
@@ -2320,6 +2465,11 @@ func _default_dir() -> String:
 
 
 func _on_file_selected(chosen: String) -> void:
+	if _character_file_slot != &"":
+		var slot: StringName = _character_file_slot
+		_character_file_slot = &""
+		_on_character_slot_committed(slot, chosen)
+		return
 	var p: String = ProjectSettings.localize_path(chosen)
 	if _pending_open:
 		_open_path(chosen)
@@ -2368,7 +2518,7 @@ func save_screenshot(target: String) -> String:
 		_say("Screenshot unavailable in headless mode")
 		return ""
 	_capturing_screenshot = true
-	var overlays: Array[Node3D] = [_grid_mi, _ghost, _mirror_x_mi, _mirror_z_mi, _layer_mi, light_rig.handles_root, prefab_rig]
+	var overlays: Array[Node3D] = [_grid_mi, _ghost, _mirror_x_mi, _mirror_z_mi, _layer_mi, light_rig.handles_root, prefab_rig, character_rig]
 	var visibility: Array[bool] = []
 	for overlay: Node3D in overlays:
 		visibility.append(overlay.visible)
@@ -2401,7 +2551,7 @@ func save_screenshot(target: String) -> String:
 
 func _set_screenshot_overlays_visible(on: bool) -> void:
 	_ui_layer.visible = on
-	for overlay: Node3D in [_grid_mi, _ghost, _mirror_x_mi, _mirror_z_mi, _layer_mi, light_rig.handles_root, prefab_rig]:
+	for overlay: Node3D in [_grid_mi, _ghost, _mirror_x_mi, _mirror_z_mi, _layer_mi, light_rig.handles_root, prefab_rig, character_rig]:
 		overlay.visible = on
 
 
@@ -2490,6 +2640,8 @@ func _build_ui() -> void:
 			key_label = "0"
 		elif i == int(Tool.MATERIAL):
 			key_label = "M"
+		elif i == int(Tool.CHARACTER):
+			key_label = "K"
 		b.text = "%s %s" % [key_label, TOOL_NAMES[i]]
 		b.toggle_mode = true
 		b.focus_mode = Control.FOCUS_NONE
@@ -2591,7 +2743,7 @@ func _build_ui() -> void:
 
 	var help_body := _section(vb, "Help", false)
 	var help_text := Label.new()
-	help_text.text = "Mouse\nLMB tool · MMB/RMB orbit\nShift+MMB/RMB pan · Wheel zoom\n\nKeyboard\nWASD fly · Space/C up/down · Shift fast\n1-9 tools · 0 Prefab · M Material · B catalogue\nR rotate prefab · Ctrl+D duplicate\nDelete deletes prefab or light\nQ/E rotate view · G grid\nH height lock · [ ] layer up/down\nCtrl+Z/Y undo/redo · Ctrl+S save\n(Cmd instead of Ctrl on macOS)"
+	help_text.text = "Mouse\nLMB tool · MMB/RMB orbit\nShift+MMB/RMB pan · Wheel zoom\n\nKeyboard\nWASD fly · Space/C up/down · Shift fast\n1-9 tools · 0 Prefab · M Material · K Character · B catalogue\nR rotate prefab · Ctrl+D duplicate\nDelete deletes prefab or light\nQ/E rotate view · G grid\nH height lock · [ ] layer up/down\nCtrl+Z/Y undo/redo · Ctrl+S save\n(Cmd instead of Ctrl on macOS)"
 	help_text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	help_text.add_theme_font_size_override("font_size", 12)
 	help_text.add_theme_color_override("font_color", Color(0.7, 0.75, 0.85))
@@ -2623,6 +2775,7 @@ func _build_ui() -> void:
 	_build_atmosphere_ui(scene)
 	_build_light_ui(scene)
 	_build_prefab_ui(scene)
+	_build_character_ui(scene)
 
 	_file_dialog = FileDialog.new()
 	_file_dialog.access = FileDialog.ACCESS_FILESYSTEM
@@ -2811,7 +2964,19 @@ func _on_meta_changed() -> void:
 	_mirror_x_mi.visible = doc.mirror_x
 	_mirror_z_mi.visible = doc.mirror_z
 	_refresh_prefab_ui()
+	_sync_character_slots()
 	_update_status()
+
+
+## Reapplies the document's saved character slot paths to the live rig
+## (open/new/reset). Unknown slot names are ignored; missing files clear.
+func _sync_character_slots() -> void:
+	if character_rig == null:
+		return
+	for slot: StringName in [&"helmet", &"chest", &"main_hand", &"off_hand"]:
+		var p: String = str(doc.character_slots.get(str(slot), ""))
+		character_rig.set_slot_model(slot, p)
+	_refresh_character_ui()
 
 func _sync_ui_from_doc() -> void:
 	if _bound_spins.is_empty():

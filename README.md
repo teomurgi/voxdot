@@ -35,10 +35,11 @@ drag a `.tres` onto the window to open it.
 
 | | |
 |---|---|
-| Tools `1`-`9`, `M`, `0` | Place, Erase, Paint, Pick, Box, Box Erase, Fill, Light, Edit Light / Material / Prefab |
+| Tools `1`-`9`, `M`, `0`, `K` | Place, Erase, Paint, Pick, Box, Box Erase, Fill, Light, Edit Light / Material / Prefab / Character |
 | `B` | open the prefab catalogue |
 | Prefab gestures | click an instance to select, drag to move, `R` rotate 90°, `Ctrl+D` duplicate, `Delete` delete, `Esc` cancel/clear |
 | Material | pick a palette material; the Material tool repaints existing voxels; Solid/Walkable overrides are per-voxel; Pick samples color + material |
+| Character | pick a class preset, assign saved `.tres` part models per slot (helmet/chest/main_hand/off_hand; empty = procedural), preview Idle/Walk/Run/Attack on the live 13-bone rig |
 | Orbit / pan / zoom | MMB or RMB / Shift+MMB / wheel |
 | Fly through the scene | hold `W` `A` `S` `D` relative to the view; `Space` / `C` for up / down; hold `Shift` to move faster |
 | Screenshot… | View-section button saves a PNG without the HUD, grid, bounds, or editing overlays |
@@ -71,8 +72,10 @@ lighting control (`add_light`/`update_light`/`remove_light`/`get_lights`/`select
 prefab control (`prefab_list_assets`/`prefab_refresh_assets`/`prefab_get_asset`/`prefab_set_pivot`/
 `prefab_reset_pivot`, `prefab_place`/`prefab_list_instances`/`prefab_get_instance`/`prefab_move`/`prefab_rotate`/
 `prefab_duplicate`/`prefab_delete`/`prefab_unpack`/`prefab_relink`/`prefab_reload`/`prefab_get_state`,
-`get_composed_voxels`), plus `get_state`, `get_voxels` and `screenshot` so the agent can read back and *see* the
 result. `prefab_place` uses an explicit `allow_over_budget` flag instead of opening a modal dialog.
+Character rig control (`character_get_state`/`character_set_preset`/`character_set_slot`/
+`character_set_anim_state`/`character_play_attack`) drives the 13-bone preview rig: class presets, saved-model
+slot paths, and Idle/Walk/Run/Attack previews.
 `GET /health` returns a status blob. Example:
 
 ```bash
@@ -86,7 +89,7 @@ Box depth extrudes Box / Box Erase. Model size (up to 1024 per axis) and real-wo
 Shrinking the size is refused if voxels would be cut off. **Fit bounds to content** shrinks or grows W/H/D to the
 furthest occupied cell (the origin stays at 0). Files default to `~/Documents/Voxdot`.
 The panel sections are collapsible — click a section header to fold it away. File, Model, Tool, Color, Material,
-View and Help live in the left panel; Sun, Atmosphere, point lights and Prefabs live in the right **Scene** panel.
+View and Help live in the left panel; Sun, Atmosphere, point lights, Prefabs and Character live in the right **Scene** panel.
 Model, point lights, Prefabs and Help start folded so the common controls fit without scrolling.
 
 ## Voxel materials

@@ -194,7 +194,7 @@ func _test_panel_layout() -> void:
 	var right_names: Array[String] = _header_names(right)
 	_check(left_names == ["File", "Model", "Tool", "Color", "Material", "View", "Help"],
 			"left panel sections: " + str(left_names))
-	_check(right_names == ["Sun (directional)", "Atmosphere", "Lighting — point lights", "Prefabs"],
+	_check(right_names == ["Sun (directional)", "Atmosphere", "Lighting — point lights", "Prefabs", "Character"],
 			"right panel sections: " + str(right_names))
 	_check(is_equal_approx((left as PanelContainer).anchor_left, 0.0), "tool panel is anchored left")
 	_check(is_equal_approx((right as PanelContainer).anchor_left, 1.0), "scene panel is anchored right")
