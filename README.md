@@ -35,9 +35,10 @@ drag a `.tres` onto the window to open it.
 
 | | |
 |---|---|
-| Tools `1`-`9` | Place, Erase, Paint, Pick, Box, Box Erase, Fill, Light, Edit Light |
-| `0` / `B` | Prefab tool / open the prefab catalogue |
+| Tools `1`-`9`, `M`, `0` | Place, Erase, Paint, Pick, Box, Box Erase, Fill, Light, Edit Light / Material / Prefab |
+| `B` | open the prefab catalogue |
 | Prefab gestures | click an instance to select, drag to move, `R` rotate 90°, `Ctrl+D` duplicate, `Delete` delete, `Esc` cancel/clear |
+| Material | pick a palette material; the Material tool repaints existing voxels; Solid/Walkable overrides are per-voxel; Pick samples color + material |
 | Orbit / pan / zoom | MMB or RMB / Shift+MMB / wheel |
 | Fly through the scene | hold `W` `A` `S` `D` relative to the view; `Space` / `C` for up / down; hold `Shift` to move faster |
 | Screenshot… | View-section button saves a PNG without the HUD, grid, bounds, or editing overlays |
@@ -66,7 +67,8 @@ as the agent works. Highlights: `set_tool`, `set_color`, `place`/`erase`/`paint`
 `begin_stroke`/`update_stroke`/`end_stroke` (a drag, as one undo step), `undo`/`redo`, `open`/`save`,
 `set_mirror`/`set_height_lock`/`set_bounds`, `set_camera`/`orbit`/`pan`/`zoom`/`frame`, `set_render_horizon`,
 lighting control (`add_light`/`update_light`/`remove_light`/`get_lights`/`select_light`/`set_light_handles`,
-`set_sun`), prefab control (`prefab_list_assets`/`prefab_refresh_assets`/`prefab_get_asset`/`prefab_set_pivot`/
+`set_sun`), voxel materials (`list_materials`/`set_material`/`get_material`/`get_voxel`/`paint_material`),
+prefab control (`prefab_list_assets`/`prefab_refresh_assets`/`prefab_get_asset`/`prefab_set_pivot`/
 `prefab_reset_pivot`, `prefab_place`/`prefab_list_instances`/`prefab_get_instance`/`prefab_move`/`prefab_rotate`/
 `prefab_duplicate`/`prefab_delete`/`prefab_unpack`/`prefab_relink`/`prefab_reload`/`prefab_get_state`,
 `get_composed_voxels`), plus `get_state`, `get_voxels` and `screenshot` so the agent can read back and *see* the
@@ -83,9 +85,25 @@ Tests: `VOXDOT_MCP_PORT=7851 godot --headless --path . -s tests/mcp_server_test.
 Box depth extrudes Box / Box Erase. Model size (up to 1024 per axis) and real-world voxel size are in the panel.
 Shrinking the size is refused if voxels would be cut off. **Fit bounds to content** shrinks or grows W/H/D to the
 furthest occupied cell (the origin stays at 0). Files default to `~/Documents/Voxdot`.
-The panel sections are collapsible — click a section header to fold it away. File, Model, Tool, Color, View and
-Help live in the left panel; Sun, Atmosphere, point lights and Prefabs live in the right **Scene** panel. Model,
-point lights, Prefabs and Help start folded so the common controls fit without scrolling.
+The panel sections are collapsible — click a section header to fold it away. File, Model, Tool, Color, Material,
+View and Help live in the left panel; Sun, Atmosphere, point lights and Prefabs live in the right **Scene** panel.
+Model, point lights, Prefabs and Help start folded so the common controls fit without scrolling.
+
+## Voxel materials
+
+Every voxel references a built-in material: Default, Stone, Dirt, Grass, Wood, Leaves, Water, Glass or Metal.
+Materials define **solid** (collision), **walkable** and tags. Voxels can override solid/walkable individually:
+
+- **Place** uses the active material and override selections from the Material section.
+- **Material** (`M`) repaints existing voxels without changing their colors.
+- **Pick** samples the color, material and overrides under the cursor.
+- Old color-only models load as the default material; the metadata is stored as compact parallel byte arrays
+  (`material_ids`, `material_overrides`) aligned with the existing cell records.
+
+At runtime, `VoxelModelInstance` builds collision only from solid cells (water and other non-solid materials
+still render), `walkable_cells()` returns the exposed top surfaces, and `is_solid_cell()` / `is_walkable_cell()`
+query the composed result including prefab instances. `VoxelModel.build_solid_grid()` and
+`build_collision_mesh()` expose the same data directly.
 
 ## Lighting
 
@@ -139,13 +157,20 @@ skipped with a warning (set `VoxelModelInstance.show_missing_prefabs` to draw de
 
 ## Screenshots
 
+**Sunny valley (512³)** — a prefab-composed diorama: the parent holds only shaped terrain and water, and every
+added element (oaks, pines, log cabins with stone foundations, arched bridge, jetty, boulders, flower/reed
+patches, fire pits, fences, clouds, sun) is a linked prefab instance. Built by `tools/build_valley_512.py` over
+MCP: terrain reserves are levelled first, then each source is saved under `Prefabs/` and placed with
+`prefab_place`. The winding river, homesteads, and meadows below are all composed live in the editor.
+
+![Prefab-composed sunny valley diorama](docs/screenshots/06-sunny-valley-512.png)
+
 **Prefabs** — linked cottages, pines and lamps composed over a meadow. The selected pine shows its outline and
 pivot, and the Prefabs section reports the instance's anchor, yaw, state and light usage.
 
 ![Linked prefab instances composed into a scene](docs/screenshots/05-prefabs.png)
 
 **Lighting** — a dusk sun plus four warm point lights, authored in the Sun/Lighting sections and saved with the
-model. The selected light's position, energy, radius, color, and shadow toggle are in the panel.
 
 ![Point lights and a dusk sun in the editor](docs/screenshots/04-lighting.png)
 

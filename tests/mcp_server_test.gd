@@ -110,6 +110,46 @@ func _run() -> void:
 	_check(((await _call("pick", {"cell": [5, 0, 5]}))["_payload"] as Dictionary)["color"] == "#00ff00", "pick sets active color")
 	_check((await _call("erase", {"cell": [5, 0, 5]}))["_ok"], "erase removes")
 
+	print("materials over MCP")
+	_ed.doc.reset()
+	var mats: Dictionary = (await _call("list_materials"))["_payload"]
+	_check((mats["materials"] as Array).size() == VoxelMaterial.count(), "list_materials")
+	var setm: Dictionary = (await _call("set_material", {"material": "stone"}))["_payload"]
+	_check(setm["id"] == "stone" and setm["solid"] and setm["walkable"], "set_material stone")
+	_check((await _call("place", {"cell": [3, 0, 3], "material": "water"}))["_ok"], "place with material")
+	var voxel: Dictionary = (await _call("get_voxel", {"cell": [3, 0, 3]}))["_payload"]
+	_check(voxel["id"] == "water" and not voxel["solid"], "get_voxel reports water")
+	var painted: Dictionary = (await _call("paint_material",
+		{"cell": [3, 0, 3], "material": "water", "solid": true, "walkable": true}))["_payload"]
+	_check(painted["solid"] and painted["walkable"], "paint_material overrides")
+	_check(not (await _call("set_material", {"material": "ston"}))["_ok"], "unknown material rejected")
+	_check(not (await _call("place", {"cell": [4, 0, 4], "material": "ston"}))["_ok"], "place rejects unknown material")
+	_check((await _call("place", {"cell": [4, 0, 4], "material": "water"}))["_ok"], "place water after rejection")
+	# place_box validates before touching editor state: color, active
+	# material and the grid must be unchanged when the material is unknown.
+	_ed.doc.reset()
+	_check((await _call("set_color", {"color": "112233"}))["_ok"], "seed color for place_box check")
+	_check((await _call("set_material", {"material": "stone"}))["_ok"], "seed material for place_box check")
+	var voxels_before: int = _ed.doc.voxel_count()
+	_check(not (await _call("place_box", {"from": [0, 0, 0], "to": [1, 0, 0],
+		"color": "ff0000", "material": "ston"}))["_ok"], "place_box rejects unknown material")
+	_check(_ed.color == Color("112233"), "place_box error leaves active color unchanged")
+	_check(_ed.current_material == VoxelMaterial.Kind.STONE, "place_box error leaves active material unchanged")
+	_check(_ed.doc.voxel_count() == voxels_before, "place_box error writes no voxels")
+	# A prefab cell covering a local void reports composed walkability; a
+	# stacked local stone on top hides the surface below.
+	_ed.doc.reset()
+	var cover_src := VoxelModel.new()
+	cover_src.set_cells({Vector3i(0, 0, 0): Color.RED}, {Vector3i(0, 0, 0): VoxelMaterial.Kind.STONE}, {})
+	var cover_placed: Dictionary = _ed.doc.place_prefab(cover_src, "cover.tres", "cover-asset",
+		Vector3(0.5, 0, 0.5), Vector3i(8, 0, 8), 0)
+	_check(bool(cover_placed.get("ok", false)), "prefab cover placed for get_voxel")
+	var covered: Dictionary = (await _call("get_voxel", {"cell": [8, 0, 8]}))["_payload"]
+	_check(covered["id"] == "stone" and bool(covered["walkable_surface"]), "get_voxel reports covered prefab surface")
+	_ed.doc.place_cells([Vector3i(8, 1, 8)] as Array[Vector3i], Color.BLUE, VoxelMaterial.Kind.STONE)
+	var capped: Dictionary = (await _call("get_voxel", {"cell": [8, 0, 8]}))["_payload"]
+	_check(not bool(capped["walkable_surface"]), "covering local stone hides the prefab surface")
+
 	print("stroke trio (mirrors a mouse drag)")
 	_ed.doc.reset()
 	_check((await _call("set_tool", {"tool": "place"}))["_ok"], "tool=place")

@@ -51,6 +51,13 @@ const MAX_ATMOSPHERE_ENERGY: float = 4.0
 const DEFAULT_ATMOSPHERE_COLOR: Color = Color(0.55, 0.57, 0.65)
 
 var grid: Dictionary = {}
+## Sparse per-voxel material IDs (VoxelMaterial.Kind); missing cells use the
+## default material. Keeping only non-default cells makes metadata cheap for
+## existing color-only models.
+var cell_materials: Dictionary = {}
+## Sparse per-voxel solid/walkable override bits; missing cells inherit from
+## their material. See VoxelMaterial.make_overrides().
+var cell_overrides: Dictionary = {}
 ## Point lights: integer ID -> {position: Vector3, color: Color,
 ## energy: float, range: float, shadows: bool}. All IDs are positive.
 var lights: Dictionary = {}
@@ -85,6 +92,7 @@ var prefab_composition: VoxelPrefabComposition = VoxelPrefabComposition.new()
 var _undo_stack: Array[Dictionary] = []
 var _redo_stack: Array[Dictionary] = []
 var _stroke: Dictionary = {}
+var _material_stroke: Dictionary = {}
 var _light_history: Dictionary = {}
 var _prefab_history: Dictionary = {} # id -> [before, after, before_index]
 var _stroke_depth: int = 0
@@ -162,6 +170,12 @@ func end_stroke() -> void:
 		if pair[0] != pair[1]:
 			net[p] = pair
 	_stroke = {}
+	var net_materials: Dictionary = {}
+	for p: Vector3i in _material_stroke:
+		var record: Array = _material_stroke[p]
+		if record[0] != record[1] or record[2] != record[3]:
+			net_materials[p] = record
+	_material_stroke = {}
 	var net_lights: Dictionary = {}
 	for id: int in _light_history:
 		var pair: Array = _light_history[id]
@@ -176,11 +190,12 @@ func end_stroke() -> void:
 		if not _same_prefab_snapshot(before, after):
 			net_prefabs[id] = record
 	_prefab_history = {}
-	if net.is_empty() and net_lights.is_empty() and net_prefabs.is_empty():
+	if net.is_empty() and net_materials.is_empty() and net_lights.is_empty() and net_prefabs.is_empty():
 		return
-	# Namespaced keys keep voxel, light and prefab history in the same undo
-	# step without making Vector3i and integer IDs collide.
-	_undo_stack.append({"voxels": net, "lights": net_lights, "prefabs": net_prefabs})
+	# Namespaced keys keep voxel, material, light and prefab history in the same
+	# undo step without making Vector3i and integer IDs collide.
+	_undo_stack.append({"voxels": net, "materials": net_materials,
+		"lights": net_lights, "prefabs": net_prefabs})
 	if _undo_stack.size() > MAX_HISTORY:
 		_undo_stack.pop_front()
 	_redo_stack.clear()
@@ -205,6 +220,14 @@ func _apply_light_history(entry: Dictionary, side: int) -> void:
 	_recompute_next_light_id()
 
 
+func _apply_material_history(entry: Dictionary, side: int) -> void:
+	for p: Vector3i in entry.get("materials", {}):
+		var record: Array = entry["materials"][p]
+		var kind_index: int = 0 if side == 0 else 1
+		var bits_index: int = 2 if side == 0 else 3
+		_apply_material_raw(p, int(record[kind_index]), int(record[bits_index]))
+
+
 func undo() -> bool:
 	if _undo_stack.is_empty():
 		return false
@@ -217,6 +240,7 @@ func undo() -> bool:
 		# content it produced has been removed.
 		for p: Vector3i in entry.get("voxels", {}):
 			_apply_raw(p, (entry["voxels"][p] as Array)[0])
+		_apply_material_history(entry, 0)
 		_apply_light_history(entry, 0)
 		_apply_prefab_history(entry, 0)
 	_redo_stack.append(entry)
@@ -239,6 +263,7 @@ func redo() -> bool:
 		# Prefabs first: unpacking removes the instance before its content
 		# is written back.
 		_apply_prefab_history(entry, 1)
+		_apply_material_history(entry, 1)
 		for p: Vector3i in entry.get("voxels", {}):
 			_apply_raw(p, (entry["voxels"][p] as Array)[1])
 		_apply_light_history(entry, 1)
@@ -289,24 +314,27 @@ func _apply_prefab_history(entry: Dictionary, side: int) -> void:
 
 # --- Editing ---
 
-func place_cells(cells: Array[Vector3i], color: Color) -> void:
+func place_cells(cells: Array[Vector3i], color: Color,
+		material: int = VoxelMaterial.Kind.DEFAULT, overrides: int = 0) -> void:
 	begin_stroke()
 	for p in cells:
 		for q in mirrored(p):
-			_write(q, color)
+			_write(q, color, material, overrides)
 	end_stroke()
 	changed.emit()
 
 
 ## Writes many cells of different colors as one stroke (one undo step).
-## `cells` maps Vector3i -> Color; mirror applies like place_cells.
+## `cells` maps Vector3i -> Color; mirror applies like place_cells. When
+## `material`/`overrides` are omitted, existing cells keep their material and
+## new cells get the default material; when supplied, they apply to every
+## written cell in the batch. Overrides mirror like everything else.
 ## Returns the number of cells whose value actually changed.
-func write_cells(cells: Dictionary) -> int:
-	begin_stroke()
+func write_cells(cells: Dictionary, material: Variant = null, overrides: Variant = null) -> int:
 	var written: int = 0
 	for p: Vector3i in cells:
 		for q in mirrored(p):
-			if _write(q, cells[p]):
+			if _write(q, cells[p], material, overrides):
 				written += 1
 	end_stroke()
 	changed.emit()
@@ -322,7 +350,7 @@ func erase_cells(cells: Array[Vector3i]) -> void:
 	changed.emit()
 
 
-## Recolors only voxels that already exist.
+## Recolors only voxels that already exist. Material metadata is preserved.
 func paint_cells(cells: Array[Vector3i], color: Color) -> void:
 	begin_stroke()
 	for p in cells:
@@ -331,6 +359,53 @@ func paint_cells(cells: Array[Vector3i], color: Color) -> void:
 				_write(q, color)
 	end_stroke()
 	changed.emit()
+
+
+## Applies a material and solid/walkable overrides to existing voxels without
+## changing their colors. Mirror applies like the other editing calls.
+func paint_material(cells: Array[Vector3i], material: int, overrides: int = 0) -> void:
+	begin_stroke()
+	for p in cells:
+		for q in mirrored(p):
+			if grid.has(q):
+				_write(q, grid[q], material, overrides)
+	end_stroke()
+	changed.emit()
+
+
+func material_at(p: Vector3i) -> int:
+	return int(cell_materials.get(p, VoxelMaterial.Kind.DEFAULT))
+
+
+func material_override_at(p: Vector3i) -> int:
+	return int(cell_overrides.get(p, 0))
+
+
+func is_solid_cell(p: Vector3i) -> bool:
+	if not grid.has(p):
+		return false
+	return VoxelMaterial.is_solid(material_at(p), material_override_at(p))
+
+
+func is_walkable_cell(p: Vector3i) -> bool:
+	if not grid.has(p):
+		return false
+	var kind: int = material_at(p)
+	var bits: int = material_override_at(p)
+	if not VoxelMaterial.is_solid(kind, bits) or not VoxelMaterial.is_walkable(kind, bits):
+		return false
+	var above: Vector3i = p + Vector3i.UP
+	return not grid.has(above) or not is_solid_cell(above)
+
+
+## Local walkable top surfaces. Composed prefab cells are handled by
+## VoxelModel.walkable_cells() at runtime.
+func walkable_cells() -> Array[Vector3i]:
+	var out: Array[Vector3i] = []
+	for p: Vector3i in grid:
+		if is_walkable_cell(p):
+			out.append(p)
+	return out
 
 
 func clear() -> void:
@@ -783,10 +858,16 @@ func unpack_prefab(id: int) -> Dictionary:
 				lights.size(), instance_lights.size(), MAX_LIGHTS])
 	var before: VoxelPrefabInstance = inst.copy_for_save()
 	var index: int = prefab_instances.find(inst)
+	var source_grid: Dictionary = inst.source.to_grid()
+	var source_materials: Dictionary = inst.source.to_material_grid()
+	var source_overrides: Dictionary = inst.source.to_override_grid()
 	begin_stroke()
 	_allow_owned_writes = true
-	for p: Vector3i in cells:
-		_write(p, prefab_composition.color_at(p))
+	for c: Vector3i in source_grid:
+		var p: Vector3i = inst.anchor + VoxelPrefabInstance.cell_offset(
+				c, inst.pivot, inst.yaw_quarters)
+		_write(p, source_grid[c], int(source_materials.get(c, VoxelMaterial.Kind.DEFAULT)),
+			int(source_overrides.get(c, 0)))
 	_allow_owned_writes = false
 	for l: Dictionary in instance_lights:
 		_add_light_raw(l)
@@ -1078,6 +1159,8 @@ static func _uid_text_for(res: Resource) -> String:
 
 func reset() -> void:
 	grid = {}
+	cell_materials = {}
+	cell_overrides = {}
 	lights = {}
 	bounds = Vector3i(32, 32, 32)
 	voxel_size = 0.0625
@@ -1098,6 +1181,7 @@ func reset() -> void:
 	_undo_stack.clear()
 	_redo_stack.clear()
 	_stroke = {}
+	_material_stroke = {}
 	_light_history = {}
 	_prefab_history = {}
 	_stroke_depth = 0
@@ -1132,7 +1216,7 @@ func to_model() -> VoxelModel:
 		if inst != null:
 			saved.append(inst.copy_for_save())
 	m.prefab_instances = saved
-	m.set_grid(grid)
+	m.set_cells(grid, cell_materials, cell_overrides)
 	return m
 
 
@@ -1177,6 +1261,16 @@ func load_model(m: VoxelModel, source_path: String = "") -> int:
 			grid[p] = src[p]
 		else:
 			dropped += 1
+	cell_materials = {}
+	var loaded_materials: Dictionary = m.to_material_grid()
+	for p: Vector3i in loaded_materials:
+		if grid.has(p):
+			cell_materials[p] = int(loaded_materials[p])
+	cell_overrides = {}
+	var loaded_overrides: Dictionary = m.to_override_grid()
+	for p: Vector3i in loaded_overrides:
+		if grid.has(p):
+			cell_overrides[p] = int(loaded_overrides[p])
 	voxel_size = m.voxel_size
 	swatches = m.swatches if not m.swatches.is_empty() else default_swatches()
 	sun_energy = clampf(m.sun_energy, 0.0, MAX_SUN_ENERGY)
@@ -1201,6 +1295,7 @@ func load_model(m: VoxelModel, source_path: String = "") -> int:
 	_undo_stack.clear()
 	_redo_stack.clear()
 	_stroke = {}
+	_material_stroke = {}
 	_light_history = {}
 	_prefab_history = {}
 	_stroke_depth = 0
@@ -1281,24 +1376,54 @@ func packed_lights() -> PackedFloat32Array:
 
 # --- Internals ---
 
-func _write(p: Vector3i, color: Variant) -> bool:
+func _write(p: Vector3i, color: Variant, material: Variant = null, overrides: Variant = null) -> bool:
 	if not in_bounds(p):
 		return false
 	# Linked instance cells are not editable until unpacked. Unpack itself
 	# sets the escape hatch because it replaces the instance in one stroke.
 	if not _allow_owned_writes and prefab_composition.has_cell(p):
 		return false
-	var old: Variant = grid.get(p, null)
-	if old == color:
+	var old_color: Variant = grid.get(p, null)
+	var old_kind: int = int(cell_materials.get(p, VoxelMaterial.Kind.DEFAULT))
+	var old_bits: int = int(cell_overrides.get(p, 0))
+	var new_kind: int = old_kind
+	var new_bits: int = old_bits
+	if color == null:
+		new_kind = VoxelMaterial.Kind.DEFAULT
+		new_bits = 0
+	else:
+		if material != null:
+			new_kind = clampi(int(material), 0, VoxelMaterial.count() - 1)
+		if overrides != null:
+			new_bits = int(overrides) & 0xFF
+	var color_changed: bool = old_color != color
+	var meta_changed: bool = old_kind != new_kind or old_bits != new_bits
+	if not color_changed and not meta_changed:
 		return false
 	if color == null:
 		grid.erase(p)
 	else:
 		grid[p] = color
-	if _stroke.has(p):
-		(_stroke[p] as Array)[1] = color
+	if new_kind == VoxelMaterial.Kind.DEFAULT:
+		cell_materials.erase(p)
 	else:
-		_stroke[p] = [old, color]
+		cell_materials[p] = new_kind
+	if new_bits == 0:
+		cell_overrides.erase(p)
+	else:
+		cell_overrides[p] = new_bits
+	if color_changed:
+		if _stroke.has(p):
+			(_stroke[p] as Array)[1] = color
+		else:
+			_stroke[p] = [old_color, color]
+	if meta_changed:
+		if _material_stroke.has(p):
+			var record: Array = _material_stroke[p]
+			record[1] = new_kind
+			record[3] = new_bits
+		else:
+			_material_stroke[p] = [old_kind, new_kind, old_bits, new_bits]
 	last_touched.append(p)
 	return true
 
@@ -1310,3 +1435,16 @@ func _apply_raw(p: Vector3i, color: Variant) -> void:
 		grid.erase(p)
 	else:
 		grid[p] = color
+
+
+func _apply_material_raw(p: Vector3i, kind: int, bits: int) -> void:
+	if not in_bounds(p):
+		return
+	if kind == VoxelMaterial.Kind.DEFAULT:
+		cell_materials.erase(p)
+	else:
+		cell_materials[p] = kind
+	if bits == 0:
+		cell_overrides.erase(p)
+	else:
+		cell_overrides[p] = bits

@@ -22,6 +22,10 @@ var bounds: Vector3i = Vector3i(32, 32, 32)
 var _columns: Dictionary = {}
 # Vector2i column -> Dictionary(Vector3i -> Color)
 var _colors: Dictionary = {}
+# Vector2i column -> Dictionary(Vector3i -> material Kind)
+var _materials: Dictionary = {}
+# Vector2i column -> Dictionary(Vector3i -> override bits)
+var _overrides: Dictionary = {}
 var _instance_cells: Dictionary = {}    # id -> Array[Vector3i] (valid only)
 var _instance_lights: Dictionary = {}   # id -> Array[Dictionary] (valid only)
 var _instance_bounds: Dictionary = {}   # id -> AABB (valid, missing, conflict)
@@ -34,6 +38,8 @@ func clear() -> void:
 	changed_columns.clear()
 	_columns.clear()
 	_colors.clear()
+	_materials.clear()
+	_overrides.clear()
 	_instance_cells.clear()
 	_instance_lights.clear()
 	_instance_bounds.clear()
@@ -55,7 +61,8 @@ func validate_candidate(inst: VoxelPrefabInstance, local_grid: Dictionary,
 		new_bounds: Vector3i, ignore_id: int = 0) -> Dictionary:
 	var result: Dictionary = {
 		"ok": false, "state": "ok", "reason": "",
-		"cells": [], "colors": [], "lights": [], "bounds": AABB(),
+		"cells": [], "colors": [], "materials": [], "overrides": [],
+		"lights": [], "bounds": AABB(),
 	}
 	if inst == null:
 		result["state"] = "missing"
@@ -125,6 +132,8 @@ func validate_candidate(inst: VoxelPrefabInstance, local_grid: Dictionary,
 	result["reason"] = ""
 	result["cells"] = cells
 	result["colors"] = colors
+	result["materials"] = cached["materials"]
+	result["overrides"] = cached["overrides"]
 	result["lights"] = lights
 	result["bounds"] = AABB(lo, (hi - lo).max(Vector3.ONE))
 	return result
@@ -241,6 +250,14 @@ func color_at(cell: Vector3i) -> Color:
 	return col.get(cell, Color(1, 1, 1, 1))
 
 
+func material_at(cell: Vector3i) -> int:
+	return int(_materials.get(_column_key(cell), {}).get(cell, VoxelMaterial.Kind.DEFAULT))
+
+
+func override_at(cell: Vector3i) -> int:
+	return int(_overrides.get(_column_key(cell), {}).get(cell, 0))
+
+
 func colors_in_column(key: Vector2i) -> Dictionary:
 	return _colors.get(key, {})
 
@@ -349,6 +366,8 @@ func _add_candidate(inst: VoxelPrefabInstance, candidate: Dictionary) -> void:
 	var id: int = inst.instance_id
 	var offsets: Array = candidate["cells"]
 	var colors: Array = candidate["colors"]
+	var mats: Array = candidate.get("materials", [])
+	var ovs: Array = candidate.get("overrides", [])
 	var lights: Array = candidate["lights"]
 	var world: Array[Vector3i] = []
 	world.resize(offsets.size())
@@ -361,8 +380,14 @@ func _add_candidate(inst: VoxelPrefabInstance, candidate: Dictionary) -> void:
 		var col_key := _column_key(p)
 		var col: Dictionary = _columns.get_or_add(col_key, {})
 		var color_col: Dictionary = _colors.get_or_add(col_key, {})
+		var mat_col: Dictionary = _materials.get_or_add(col_key, {})
+		var ov_col: Dictionary = _overrides.get_or_add(col_key, {})
 		col[p] = id
 		color_col[p] = colors[i]
+		if i < mats.size() and int(mats[i]) != VoxelMaterial.Kind.DEFAULT:
+			mat_col[p] = int(mats[i])
+		if i < ovs.size() and int(ovs[i]) != 0:
+			ov_col[p] = int(ovs[i])
 		changed_columns[col_key] = true
 
 
@@ -374,10 +399,14 @@ func _remove_instance_data(id: int) -> void:
 		if int(col.get(p, 0)) == id:
 			col.erase(p)
 			(_colors.get(col_key, {}) as Dictionary).erase(p)
+			(_materials.get(col_key, {}) as Dictionary).erase(p)
+			(_overrides.get(col_key, {}) as Dictionary).erase(p)
 			changed_columns[col_key] = true
 		if col.is_empty():
 			_columns.erase(col_key)
 			_colors.erase(col_key)
+			_materials.erase(col_key)
+			_overrides.erase(col_key)
 	_instance_cells.erase(id)
 	_instance_lights.erase(id)
 	_instance_bounds.erase(id)
@@ -394,12 +423,18 @@ func _compute_offsets(inst: VoxelPrefabInstance) -> Dictionary:
 		return cached
 	var cells: Array = []
 	var colors: Array = []
+	var mats: Array = []
+	var ovs: Array = []
 	var lights: Array = []
 	if inst.source != null:
 		var grid: Dictionary = inst.source.to_grid()
+		var src_mats: Dictionary = inst.source.to_material_grid()
+		var src_ovs: Dictionary = inst.source.to_override_grid()
 		for c: Vector3i in grid:
 			cells.append(VoxelPrefabInstance.cell_offset(c, inst.pivot, yaw))
 			colors.append(grid[c])
+			mats.append(int(src_mats.get(c, VoxelMaterial.Kind.DEFAULT)))
+			ovs.append(int(src_ovs.get(c, 0)))
 		var packed: PackedFloat32Array = inst.source.lights
 		for i in range(0, packed.size() - VoxelModel.LIGHT_STRIDE + 1, VoxelModel.LIGHT_STRIDE):
 			var pos := Vector3(packed[i + 1], packed[i + 2], packed[i + 3])
@@ -418,6 +453,8 @@ func _compute_offsets(inst: VoxelPrefabInstance) -> Dictionary:
 		"yaw": yaw,
 		"cells": cells,
 		"colors": colors,
+		"materials": mats,
+		"overrides": ovs,
 		"lights": lights,
 	}
 	_offsets[inst.instance_id] = data

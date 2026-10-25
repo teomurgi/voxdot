@@ -1,10 +1,11 @@
 class_name VoxelMeshBuilder
 extends RefCounted
 
-## Builds crisp, vertex-colored blocky voxel meshes from voxel grids.
 ## A grid is a Dictionary of { Vector3i: Color }. Voxel at grid position p
 ## occupies the space [p * voxel_size, (p + 1) * voxel_size].
-## Internal faces between two solid voxels are culled.
+## Internal faces between two present voxels are culled. All materials render
+## opaque today (water/glass included), so the builder takes no material input;
+## transparent materials will need material-aware face culling later.
 
 const FACES: Array[Dictionary] = [
 	{"n": Vector3i(1, 0, 0), "c": [Vector3(1, 0, 0), Vector3(1, 0, 1), Vector3(1, 1, 1), Vector3(1, 1, 0)], "s": 0.80},
@@ -57,7 +58,7 @@ static func merge(dst: Dictionary, src: Dictionary) -> Dictionary:
 	return dst
 
 
-## Builds an ArrayMesh from the grid. Faces between solid voxels are culled.
+## Builds an ArrayMesh from the grid. Faces between present voxels are culled.
 ## Applies per-face directional shading plus deterministic per-voxel jitter.
 static func build_mesh(grid: Dictionary, voxel_size: float) -> ArrayMesh:
 	var verts := PackedVector3Array()

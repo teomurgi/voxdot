@@ -22,6 +22,7 @@ func _initialize() -> void:
 	_test_model_roundtrip()
 	_test_lights()
 	_test_atmosphere()
+	_test_materials()
 	_test_raycast()
 	_test_prefabs()
 	print("voxel_document_test: ", "PASS" if _fails == 0 else "%d FAILED" % _fails)
@@ -219,6 +220,153 @@ func _test_atmosphere() -> void:
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
 
 
+func _test_materials() -> void:
+	print("materials")
+	var d := VoxelDocument.new()
+	_check(d.material_at(Vector3i(1, 0, 1)) == VoxelMaterial.Kind.DEFAULT, "default material")
+	d.place_cells([Vector3i(1, 0, 1)] as Array[Vector3i], Color.RED, VoxelMaterial.Kind.STONE)
+	_check(d.material_at(Vector3i(1, 0, 1)) == VoxelMaterial.Kind.STONE, "place stores material")
+	_check(d.is_solid_cell(Vector3i(1, 0, 1)) and d.is_walkable_cell(Vector3i(1, 0, 1)),
+		"stone is solid + walkable")
+	d.place_cells([Vector3i(2, 0, 1)] as Array[Vector3i], Color.BLUE, VoxelMaterial.Kind.WATER)
+	_check(not d.is_solid_cell(Vector3i(2, 0, 1)) and not d.is_walkable_cell(Vector3i(2, 0, 1)),
+		"water is non-solid")
+	d.paint_material([Vector3i(2, 0, 1)] as Array[Vector3i], VoxelMaterial.Kind.WATER,
+		VoxelMaterial.make_overrides(VoxelMaterial.Override.ON, VoxelMaterial.Override.ON))
+	_check(d.is_solid_cell(Vector3i(2, 0, 1)) and d.is_walkable_cell(Vector3i(2, 0, 1)),
+		"overrides make water solid + walkable")
+	_check(d.material_override_at(Vector3i(2, 0, 1))
+		== VoxelMaterial.make_overrides(VoxelMaterial.Override.ON, VoxelMaterial.Override.ON),
+		"override bits stored")
+	d.paint_cells([Vector3i(1, 0, 1)] as Array[Vector3i], Color.GREEN)
+	_check(d.material_at(Vector3i(1, 0, 1)) == VoxelMaterial.Kind.STONE,
+		"color paint preserves material")
+	d.paint_material([Vector3i(1, 0, 1)] as Array[Vector3i], VoxelMaterial.Kind.LEAVES)
+	_check(d.grid[Vector3i(1, 0, 1)] == Color.GREEN and not d.is_walkable_cell(Vector3i(1, 0, 1)),
+		"material paint preserves color, leaves are not walkable")
+	d.undo()
+	_check(d.material_at(Vector3i(1, 0, 1)) == VoxelMaterial.Kind.STONE, "undo material paint")
+	d.redo()
+	_check(d.material_at(Vector3i(1, 0, 1)) == VoxelMaterial.Kind.LEAVES, "redo material paint")
+	d.place_cells([Vector3i(7, 0, 7)] as Array[Vector3i], Color.ORANGE, VoxelMaterial.Kind.WATER)
+	d.undo()
+	_check(not d.grid.has(Vector3i(7, 0, 7))
+		and d.material_at(Vector3i(7, 0, 7)) == VoxelMaterial.Kind.DEFAULT,
+		"undo placement clears material")
+	d.redo()
+	_check(d.material_at(Vector3i(7, 0, 7)) == VoxelMaterial.Kind.WATER,
+		"redo placement restores material")
+	var path := "user://voxel_document_materials.tres"
+	_check(d.save_file(path) == OK, "save materials")
+	var e := VoxelDocument.new()
+	_check(e.load_file(path) == OK, "load materials")
+	_check(e.material_at(Vector3i(1, 0, 1)) == VoxelMaterial.Kind.LEAVES, "material survives round-trip")
+	_check(e.material_override_at(Vector3i(2, 0, 1))
+		== VoxelMaterial.make_overrides(VoxelMaterial.Override.ON, VoxelMaterial.Override.ON),
+		"override survives round-trip")
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	# Only the exposed top cell of a column is a walkable surface.
+	var w := VoxelDocument.new()
+	w.place_cells([Vector3i(4, 0, 4), Vector3i(4, 1, 4)] as Array[Vector3i], Color.RED,
+		VoxelMaterial.Kind.STONE)
+	_check(not w.is_walkable_cell(Vector3i(4, 0, 4)) and w.is_walkable_cell(Vector3i(4, 1, 4)),
+		"only the top surface is walkable")
+	# Composed model helpers agree with the document for local stacks, and a
+	# stacked covering cell still hides the surface below at model level.
+	var w_model := w.to_model()
+	var w_data: Dictionary = w_model.build_composed_data()
+	_check(not w_model.is_walkable_cell(Vector3i(4, 0, 4), w_data)
+		and w_model.is_walkable_cell(Vector3i(4, 1, 4), w_data),
+		"composed walkability matches the local stack")
+	# Old 4-int models have no metadata arrays and must behave as default stone.
+	var old := VoxelModel.new()
+	old.bounds = Vector3i(4, 4, 4)
+	old.palette = PackedColorArray([Color.RED])
+	old.cells = PackedInt32Array([0, 0, 0, 0])
+	var old_doc := VoxelDocument.new()
+	old_doc.load_model(old)
+	_check(old_doc.material_at(Vector3i.ZERO) == VoxelMaterial.Kind.DEFAULT
+		and old_doc.is_solid_cell(Vector3i.ZERO), "old model gets the default solid material")
+	# Model-level helpers used by the runtime.
+	var surf := VoxelDocument.new()
+	surf.place_cells([Vector3i(0, 0, 0), Vector3i(0, 1, 0)] as Array[Vector3i], Color.RED,
+		VoxelMaterial.Kind.STONE)
+	var surf_model := surf.to_model()
+	_check(surf_model.build_solid_grid().has(Vector3i(0, 1, 0)), "solid grid includes solid cells")
+	_check(surf_model.walkable_cells().has(Vector3i(0, 1, 0)), "walkable cells derive the top surface")
+	_check(not surf_model.walkable_cells().has(Vector3i(0, 0, 0)), "covered cells are not walkable")
+	_check(surf_model.build_collision_mesh().get_surface_count() > 0, "collision mesh builds")
+	var water_doc := VoxelDocument.new()
+	water_doc.place_cells([Vector3i(0, 0, 0)] as Array[Vector3i], Color.BLUE, VoxelMaterial.Kind.WATER)
+	var water_model := water_doc.to_model()
+	_check(water_model.build_solid_grid().is_empty(), "water is omitted from the solid grid")
+	_check(water_model.build_collision_mesh().get_surface_count() == 0, "water has no collision mesh")
+	# Unknown ids never match; out-of-range kinds are clamped to the registry.
+	_check(VoxelMaterial.try_kind_from_id("ston") < 0, "unknown id has no kind")
+	_check(not VoxelMaterial.is_known_id("ston"), "unknown id is not known")
+	_check(VoxelMaterial.is_known_id(" Stone ") and VoxelMaterial.try_kind_from_id("STONE")
+		== VoxelMaterial.Kind.STONE, "id lookup is case-insensitive and trimmed")
+	var clamp_doc := VoxelDocument.new()
+	clamp_doc.place_cells([Vector3i(0, 0, 0)] as Array[Vector3i], Color.RED, 999, 0x1FF)
+	_check(clamp_doc.material_at(Vector3i.ZERO) == VoxelMaterial.Kind.METAL,
+		"out-of-range kind clamps to the last material")
+	_check(clamp_doc.material_override_at(Vector3i.ZERO) == 0xFF, "override bits are masked to one byte")
+	# Bulk writes report only cells whose value actually changed.
+	var bulk := VoxelDocument.new()
+	_check(bulk.write_cells({Vector3i(1, 0, 1): Color.RED, Vector3i(2, 0, 1): Color.BLUE}) == 2,
+		"bulk write places new cells")
+	_check(bulk.write_cells({Vector3i(1, 0, 1): Color.RED, Vector3i(5, 0, 5): Color.GREEN}) == 1,
+		"bulk write skips unchanged and out-of-bounds cells")
+	# Default-only saves write no metadata arrays, however large the model.
+	var big := VoxelDocument.new()
+	big.write_cells({Vector3i(0, 0, 0): Color.RED, Vector3i(31, 31, 31): Color.BLUE})
+	var big_model := big.to_model()
+	_check(big_model.material_ids.is_empty() and big_model.material_overrides.is_empty(),
+		"default-only save writes no metadata arrays")
+	big_model.set_cells(big.grid, {Vector3i(0, 0, 0): VoxelMaterial.Kind.STONE}, {Vector3i(31, 31, 31): 0})
+	_check(big_model.material_ids.size() == 2 and big_model.material_overrides.is_empty(),
+		"sparse metadata aligns with sorted cell order")
+	# Prefab composition exposes source metadata so Pick can sample it.
+	var src := VoxelModel.new()
+	src.set_cells({Vector3i(0, 0, 0): Color.RED}, {Vector3i(0, 0, 0): VoxelMaterial.Kind.GLASS}, {})
+	var parent := VoxelDocument.new()
+	var placed: Dictionary = parent.place_prefab(src, "src.tres", "asset",
+		Vector3(0.5, 0, 0.5), Vector3i(10, 0, 10), 0)
+	_check(bool(placed.get("ok", false)), "prefab place ok for metadata check")
+	_check(parent.prefab_composition.material_at(Vector3i(10, 0, 10)) == VoxelMaterial.Kind.GLASS,
+		"composition exposes linked material metadata")
+	_check(parent.prefab_composition.color_at(Vector3i(10, 0, 10)) == Color.RED,
+		"composition still exposes linked color")
+	# Rotation keeps metadata attached to the same world cells via the aligned
+	# offset cache (no inverse pivot/yaw math): source (0,0,0) stays at the
+	# anchor, source (1,0,0) rotates to (10,0,9) carrying the water metadata.
+	var rot_src := VoxelModel.new()
+	rot_src.set_cells(
+		{Vector3i(0, 0, 0): Color.RED, Vector3i(1, 0, 0): Color.BLUE},
+		{Vector3i(1, 0, 0): VoxelMaterial.Kind.WATER},
+		{Vector3i(1, 0, 0): VoxelMaterial.make_overrides(VoxelMaterial.Override.ON,
+			VoxelMaterial.Override.INHERIT)})
+	var rot_parent := VoxelDocument.new()
+	var rot_placed: Dictionary = rot_parent.place_prefab(rot_src, "rot.tres", "rot-asset",
+		Vector3(1, 0, 0.5), Vector3i(10, 0, 10), 1)
+	_check(bool(rot_placed.get("ok", false)), "rotated prefab places for metadata check")
+	_check(rot_parent.prefab_composition.material_at(Vector3i(10, 0, 9)) == VoxelMaterial.Kind.WATER,
+		"rotated metadata follows the water cell")
+	_check(rot_parent.prefab_composition.material_at(Vector3i(10, 0, 10)) == VoxelMaterial.Kind.DEFAULT,
+		"rotated default cell stores no metadata")
+	_check(rot_parent.prefab_composition.override_at(Vector3i(10, 0, 9))
+		== VoxelMaterial.make_overrides(VoxelMaterial.Override.ON, VoxelMaterial.Override.INHERIT),
+		"rotated override bits follow the water cell")
+	# Local content coexists with nearby prefab cells in the composed grid: the
+	# placed local stone wins the composed answer at its own cell.
+	rot_parent.place_cells([Vector3i(10, 0, 11)] as Array[Vector3i], Color.GREEN,
+		VoxelMaterial.Kind.STONE)
+	var composed: Dictionary = rot_parent.to_model().build_composed_data()
+	_check(int((composed["materials"] as Dictionary).get(Vector3i(10, 0, 9),
+		VoxelMaterial.Kind.DEFAULT)) == VoxelMaterial.Kind.WATER,
+		"prefab water metadata survives beside local content")
+
+
 func _test_raycast() -> void:
 	print("raycast")
 	var b := Vector3i(8, 8, 8)
@@ -289,6 +437,31 @@ func _test_prefabs() -> void:
 	_check(d.prefab_instances.size() == 2, "undo delete restores the instance")
 	d.redo()
 	_check(d.prefab_instances.size() == 1, "redo deletes again")
+
+	print("prefabs: material metadata")
+	var mat_src := VoxelModel.new()
+	mat_src.bounds = Vector3i(4, 4, 4)
+	mat_src.set_cells(
+		{Vector3i(0, 0, 0): Color.RED, Vector3i(1, 0, 0): Color.BLUE},
+		{Vector3i(0, 0, 0): VoxelMaterial.Kind.STONE, Vector3i(1, 0, 0): VoxelMaterial.Kind.WATER},
+		{})
+	var mat_path: String = dir.path_join("Prefabs/material_tree.tres")
+	_check(ResourceSaver.save(mat_src, mat_path) == OK, "material prefab source saved")
+	var md := VoxelDocument.new()
+	var mat_res: Dictionary = md.place_prefab(mat_src, "Prefabs/material_tree.tres", "material_tree",
+		Vector3.ZERO, Vector3i(4, 0, 4), 0)
+	_check(mat_res["ok"], "material prefab placed")
+	var mat_model := md.to_model()
+	var mat_data := mat_model.build_composed_data()
+	_check(int(mat_data["materials"].get(Vector3i(4, 0, 4), -1)) == VoxelMaterial.Kind.STONE,
+		"prefab stone material composes")
+	_check(int(mat_data["materials"].get(Vector3i(5, 0, 4), -1)) == VoxelMaterial.Kind.WATER,
+		"prefab water material composes")
+	_check(not mat_model.is_solid_cell(Vector3i(5, 0, 4)), "composed prefab water is non-solid")
+	var unpack_mat: Dictionary = md.unpack_prefab(int(mat_res["instance_id"]))
+	_check(unpack_mat["ok"] and md.material_at(Vector3i(4, 0, 4)) == VoxelMaterial.Kind.STONE
+		and md.material_at(Vector3i(5, 0, 4)) == VoxelMaterial.Kind.WATER,
+		"unpack preserves prefab materials")
 
 	print("prefabs: save / load")
 	var parent_path: String = dir.path_join("castle.tres")

@@ -226,7 +226,7 @@ func _tool_list_tools(_args: Dictionary) -> Variant:
 	return TOOL_NAMES_LIST
 
 
-const TOOL_NAMES_LIST: Array[String] = ["place", "erase", "paint", "pick", "box", "box_erase", "fill", "light", "edit_light", "prefab"]
+const TOOL_NAMES_LIST: Array[String] = ["place", "erase", "paint", "pick", "box", "box_erase", "fill", "light", "edit_light", "prefab", "material"]
 
 
 func _tool_set_tool(args: Dictionary) -> Variant:
@@ -254,14 +254,134 @@ func _tool_get_color(_args: Dictionary) -> Variant:
 	return {"color": "#" + editor.color.to_html(false)}
 
 
+func _material_id(value: Variant, fallback: int) -> Variant:
+	if value == null or str(value) == "":
+		return fallback
+	var found: int = VoxelMaterial.try_kind_from_id(str(value))
+	if found < 0:
+		return null
+	return found
+
+
+func _override_value(value: Variant) -> Variant:
+	if value == null:
+		return null
+	return VoxelMaterial.Override.ON if bool(value) else VoxelMaterial.Override.OFF
+
+
+func _material_bits(args: Dictionary, fallback: int = 0) -> int:
+	var solid: Variant = _override_value(args.get("solid"))
+	var walkable: Variant = _override_value(args.get("walkable"))
+	if solid == null and walkable == null:
+		return fallback
+	return VoxelMaterial.make_overrides(
+		int(solid) if solid != null else VoxelMaterial.solid_override(fallback),
+		int(walkable) if walkable != null else VoxelMaterial.walkable_override(fallback))
+
+
+func _material_payload(kind: int, bits: int) -> Dictionary:
+	var tag_list: Array = []
+	for t: String in VoxelMaterial.tags(kind):
+		tag_list.append(t)
+	return {
+		"id": VoxelMaterial.id(kind),
+		"name": VoxelMaterial.display_name(kind),
+		"color": "#" + VoxelMaterial.color(kind).to_html(false),
+		"solid": VoxelMaterial.is_solid(kind, bits),
+		"walkable": VoxelMaterial.is_walkable(kind, bits),
+		"solid_override": VoxelMaterial.solid_override(bits),
+		"walkable_override": VoxelMaterial.walkable_override(bits),
+		"tags": tag_list,
+	}
+
+
+func _tool_list_materials(_args: Dictionary) -> Variant:
+	var out: Array = []
+	for i in VoxelMaterial.count():
+		out.append(_material_payload(i, 0))
+	return {"materials": out}
+
+
+func _tool_set_material(args: Dictionary) -> Variant:
+	if not args.has("material"):
+		return _tool_error("material is required")
+	if not VoxelMaterial.is_known_id(str(args.get("material"))):
+		return _tool_error("unknown material: " + str(args.get("material")))
+	var kind: int = VoxelMaterial.kind_from_id(str(args.get("material")))
+	var bits: int = _material_bits(args, 0)
+	editor._set_material(kind)
+	editor._set_material_overrides(VoxelMaterial.solid_override(bits),
+		VoxelMaterial.walkable_override(bits))
+	return _material_payload(editor.current_material, editor.current_material_overrides)
+
+
+func _tool_get_material(_args: Dictionary) -> Variant:
+	return _material_payload(editor.current_material, editor.current_material_overrides)
+
+
+func _tool_get_voxel(args: Dictionary) -> Variant:
+	var cell: Variant = _arg_vec3i(args, "cell")
+	if cell == null:
+		return _tool_error("cell must be [x, y, z]")
+	var kind: int = VoxelMaterial.Kind.DEFAULT
+	var bits: int = 0
+	var col: Variant = null
+	if editor.doc.grid.has(cell):
+		kind = editor.doc.material_at(cell)
+		bits = editor.doc.material_override_at(cell)
+		col = editor.doc.grid[cell]
+	elif editor.doc.prefab_composition.has_cell(cell):
+		kind = editor.doc.prefab_composition.material_at(cell)
+		bits = editor.doc.prefab_composition.override_at(cell)
+		col = editor.doc.prefab_composition.color_at(cell)
+	else:
+		return _tool_error("no voxel at cell")
+	# Composed truth either way: covering linked or local cells and non-solid
+	# cells above all change the walkable-surface answer.
+	var composed: Dictionary = editor.doc.to_model().build_composed_data()
+	var walkable: bool = VoxelModel.new().is_walkable_cell(cell, composed)
+	var payload: Dictionary = _material_payload(kind, bits)
+	payload["cell"] = [cell.x, cell.y, cell.z]
+	payload["color"] = "#" + (col as Color).to_html(false)
+	payload["walkable_surface"] = walkable
+	return payload
+
+
+func _tool_paint_material(args: Dictionary) -> Variant:
+	var cell: Variant = _arg_vec3i(args, "cell")
+	if cell == null:
+		return _tool_error("cell must be [x, y, z]")
+	if not editor.doc.grid.has(cell):
+		return _tool_error("no voxel at cell")
+	if not args.has("material"):
+		return _tool_error("material is required")
+	if not VoxelMaterial.is_known_id(str(args.get("material"))):
+		return _tool_error("unknown material: " + str(args.get("material")))
+	var kind: int = VoxelMaterial.kind_from_id(str(args.get("material")))
+	var bits: int = _material_bits(args, 0)
+	editor._set_material(kind)
+	editor._set_material_overrides(VoxelMaterial.solid_override(bits),
+		VoxelMaterial.walkable_override(bits))
+	editor.doc.paint_material([cell], kind, bits)
+	return _material_payload(kind, bits)
+
+
 func _tool_place(args: Dictionary) -> Variant:
 	var cell: Variant = _arg_vec3i(args, "cell")
 	if cell == null:
 		return _tool_error("cell must be [x, y, z]")
 	if not editor.doc.in_bounds(cell):
 		return _tool_error("cell out of bounds")
-	editor.doc.place_cells([cell], editor.color)
-	return {"placed": [cell.x, cell.y, cell.z], "count": editor.doc.voxel_count()}
+	var kind: int = editor.current_material
+	var bits: int = editor.current_material_overrides
+	if args.has("material") or args.has("solid") or args.has("walkable"):
+		if args.has("material") and not VoxelMaterial.is_known_id(str(args.get("material"))):
+			return _tool_error("unknown material: " + str(args.get("material")))
+		kind = _material_id(args.get("material"), kind)
+		bits = _material_bits(args, 0)
+	editor.doc.place_cells([cell], editor.color, kind, bits)
+	return {"placed": [cell.x, cell.y, cell.z], "count": editor.doc.voxel_count(),
+		"material": VoxelMaterial.id(kind)}
 
 
 func _tool_erase(args: Dictionary) -> Variant:
@@ -317,8 +437,15 @@ func _tool_place_voxels(args: Dictionary) -> Variant:
 		cells[Vector3i(int(xyz[0]), int(xyz[1]), int(xyz[2]))] = c
 	if cells.is_empty():
 		return {"count": editor.doc.voxel_count()}
-	editor.doc.write_cells(cells)
-	return {"placed": cells.size(), "count": editor.doc.voxel_count()}
+	var kind: Variant = null
+	var bits: Variant = null
+	if args.has("material") or args.has("solid") or args.has("walkable"):
+		if args.has("material") and not VoxelMaterial.is_known_id(str(args.get("material"))):
+			return _tool_error("unknown material: " + str(args.get("material")))
+		kind = _material_id(args.get("material"), editor.current_material)
+		bits = _material_bits(args, 0)
+	var written: int = editor.doc.write_cells(cells, kind, bits)
+	return {"placed": written, "count": editor.doc.voxel_count()}
 
 
 func _tool_place_box(args: Dictionary) -> Variant:
@@ -328,13 +455,20 @@ func _tool_place_box(args: Dictionary) -> Variant:
 		return _tool_error("from and to must be [x, y, z]")
 	var erase: bool = bool(args.get("erase", false))
 	var cells: Array[Vector3i] = VoxelDocument.box_cells(from, to)
+	if not erase and args.has("material") and not VoxelMaterial.is_known_id(str(args.get("material"))):
+		return _tool_error("unknown material: " + str(args.get("material")))
 	var c: Variant = _parse_color(args.get("color"))
 	if erase:
 		editor.doc.erase_cells(cells)
 	else:
 		if c != null:
 			editor._set_color(c)
-		editor.doc.place_cells(cells, editor.color)
+		var kind: int = editor.current_material
+		var bits: int = editor.current_material_overrides
+		if args.has("material") or args.has("solid") or args.has("walkable"):
+			kind = _material_id(args.get("material"), kind)
+			bits = _material_bits(args, 0)
+		editor.doc.place_cells(cells, editor.color, kind, bits)
 	return {"box_cells": cells.size(), "count": editor.doc.voxel_count()}
 
 
@@ -393,10 +527,23 @@ func _tool_pick(args: Dictionary) -> Variant:
 	var cell: Variant = _arg_vec3i(args, "cell")
 	if cell == null:
 		return _tool_error("cell must be [x, y, z]")
-	if not editor.doc.grid.has(cell):
+	if editor.doc.grid.has(cell):
+		editor._set_material(editor.doc.material_at(cell))
+		var local_bits: int = editor.doc.material_override_at(cell)
+		editor._set_material_overrides(VoxelMaterial.solid_override(local_bits),
+			VoxelMaterial.walkable_override(local_bits))
+		editor._set_color(editor.doc.grid[cell])
+	elif editor.doc.prefab_composition.has_cell(cell):
+		editor._set_material(editor.doc.prefab_composition.material_at(cell))
+		var linked_bits: int = editor.doc.prefab_composition.override_at(cell)
+		editor._set_material_overrides(VoxelMaterial.solid_override(linked_bits),
+			VoxelMaterial.walkable_override(linked_bits))
+		editor._set_color(editor.doc.prefab_composition.color_at(cell))
+	else:
 		return _tool_error("no voxel at cell")
-	editor._set_color(editor.doc.grid[cell])
-	return {"color": "#" + editor.color.to_html(false)}
+	var payload: Dictionary = _material_payload(editor.current_material, editor.current_material_overrides)
+	payload["color"] = "#" + editor.color.to_html(false)
+	return payload
 
 
 func _tool_undo(_args: Dictionary) -> Variant:
@@ -1039,6 +1186,11 @@ func _full_state() -> Dictionary:
 	return {
 		"tool": TOOL_NAMES_LIST[int(editor.current_tool)],
 		"color": "#" + editor.color.to_html(false),
+		"material": VoxelMaterial.id(editor.current_material),
+		"material_name": VoxelMaterial.display_name(editor.current_material),
+		"material_solid": VoxelMaterial.is_solid(editor.current_material, editor.current_material_overrides),
+		"material_walkable": VoxelMaterial.is_walkable(editor.current_material, editor.current_material_overrides),
+		"material_overrides": editor.current_material_overrides,
 		"bounds": [editor.doc.bounds.x, editor.doc.bounds.y, editor.doc.bounds.z],
 		"voxel_size": editor.doc.voxel_size,
 		"voxel_count": editor.doc.voxel_count(),
@@ -1087,17 +1239,22 @@ func _define_tools() -> Array[Dictionary]:
 		{"name": "get_voxels", "description": "Every voxel: cell [x,y,z] and hex color.", "inputSchema": {"type": "object", "properties": {}}},
 		{"name": "screenshot", "description": "Save the current window to a PNG; returns its path. Use to see what the user sees.", "inputSchema": {"type": "object", "properties": {}}},
 		{"name": "list_tools", "description": "Names of the editing tools.", "inputSchema": {"type": "object", "properties": {}}},
-		{"name": "set_tool", "description": "Select a tool: place, erase, paint, pick, box, box_erase, fill, light, edit_light, prefab.", "inputSchema": {"type": "object", "properties": {"tool": {"type": "string", "enum": ["place", "erase", "paint", "pick", "box", "box_erase", "fill", "light", "edit_light", "prefab"]}}, "required": ["tool"]}},
+		{"name": "set_tool", "description": "Select a tool: place, erase, paint, pick, box, box_erase, fill, light, edit_light, prefab, material.", "inputSchema": {"type": "object", "properties": {"tool": {"type": "string", "enum": ["place", "erase", "paint", "pick", "box", "box_erase", "fill", "light", "edit_light", "prefab", "material"]}}, "required": ["tool"]}},
 		{"name": "get_tool", "description": "Currently selected tool.", "inputSchema": {"type": "object", "properties": {}}},
 		{"name": "set_color", "description": "Set the active color.", "inputSchema": {"type": "object", "properties": {"color": color}, "required": ["color"]}},
 		{"name": "get_color", "description": "Active color as hex.", "inputSchema": {"type": "object", "properties": {}}},
-		{"name": "place", "description": "Place one voxel at cell with the active color (mirror applies).", "inputSchema": {"type": "object", "properties": {"cell": cell}, "required": ["cell"]}},
+		{"name": "list_materials", "description": "List the built-in voxel materials with stable id, display name, color, base solid/walkable flags and tags.", "inputSchema": {"type": "object", "properties": {}}},
+		{"name": "set_material", "description": "Set the active material by id/name, with optional solid/walkable overrides (true/false for override, omit to inherit).", "inputSchema": {"type": "object", "properties": {"material": {"type": "string"}, "solid": {"type": ["boolean", "null"]}, "walkable": {"type": ["boolean", "null"]}}, "required": ["material"]}},
+		{"name": "get_material", "description": "Active material, its effective solid/walkable flags, override bits and tags.", "inputSchema": {"type": "object", "properties": {}}},
+		{"name": "get_voxel", "description": "Color and material metadata for one cell.", "inputSchema": {"type": "object", "properties": {"cell": cell}, "required": ["cell"]}},
+		{"name": "paint_material", "description": "Apply a material to the existing voxel at cell without changing its color. Optional solid/walkable overrides.", "inputSchema": {"type": "object", "properties": {"cell": cell, "material": {"type": "string"}, "solid": {"type": ["boolean", "null"]}, "walkable": {"type": ["boolean", "null"]}}, "required": ["cell", "material"]}},
+		{"name": "place", "description": "Place one voxel at cell with the active color and material (mirror applies). Optional material and solid/walkable overrides.", "inputSchema": {"type": "object", "properties": {"cell": cell, "material": {"type": "string"}, "solid": {"type": ["boolean", "null"]}, "walkable": {"type": ["boolean", "null"]}}, "required": ["cell"]}},
 		{"name": "erase", "description": "Erase the voxel at cell (mirror applies).", "inputSchema": {"type": "object", "properties": {"cell": cell}, "required": ["cell"]}},
-		{"name": "paint", "description": "Recolor the existing voxel at cell.", "inputSchema": {"type": "object", "properties": {"cell": cell, "color": color}, "required": ["cell"]}},
-		{"name": "fill", "description": "Flood-recolor all connected voxels sharing the color at cell.", "inputSchema": {"type": "object", "properties": {"cell": cell, "color": color}, "required": ["cell"]}},
-		{"name": "place_box", "description": "Fill (or erase with erase=true) the box between cells from and to.", "inputSchema": {"type": "object", "properties": {"from": cell, "to": cell, "color": color, "erase": {"type": "boolean"}}, "required": ["from", "to"]}},
-		{"name": "place_voxels", "description": "Batch-write many voxels of different colors in one call (one undo step, one mesh rebuild). data = array of \"x,y,z;rrggbb\" strings. Much faster than many place calls for large builds.", "inputSchema": {"type": "object", "properties": {"data": {"type": "array", "items": {"type": "string"}}}, "required": ["data"]}},
-		{"name": "pick", "description": "Set the active color from the voxel at cell.", "inputSchema": {"type": "object", "properties": {"cell": cell}, "required": ["cell"]}},
+		{"name": "paint", "description": "Recolor the existing voxel at cell; material metadata is preserved.", "inputSchema": {"type": "object", "properties": {"cell": cell, "color": color}, "required": ["cell"]}},
+		{"name": "fill", "description": "Flood-recolor all connected voxels sharing the color at cell; material metadata is preserved.", "inputSchema": {"type": "object", "properties": {"cell": cell, "color": color}, "required": ["cell"]}},
+		{"name": "place_box", "description": "Fill (or erase with erase=true) the box between cells from and to. Optional material and solid/walkable overrides.", "inputSchema": {"type": "object", "properties": {"from": cell, "to": cell, "color": color, "material": {"type": "string"}, "solid": {"type": ["boolean", "null"]}, "walkable": {"type": ["boolean", "null"]}, "erase": {"type": "boolean"}}, "required": ["from", "to"]}},
+		{"name": "place_voxels", "description": "Batch-write many voxels of different colors in one call (one undo step, one mesh rebuild). data = array of \"x,y,z;rrggbb\" strings. Optional material and solid/walkable overrides apply to the whole batch. Much faster than many place calls for large builds.", "inputSchema": {"type": "object", "properties": {"data": {"type": "array", "items": {"type": "string"}}, "material": {"type": "string"}, "solid": {"type": ["boolean", "null"]}, "walkable": {"type": ["boolean", "null"]}}, "required": ["data"]}},
+		{"name": "pick", "description": "Sample the voxel at cell: sets the active color, material and overrides (linked prefab cells included).", "inputSchema": {"type": "object", "properties": {"cell": cell}, "required": ["cell"]}},
 		{"name": "begin_stroke", "description": "Start an LMB-style drag at cell (normal = face normal, default up). Locks the drag plane like a mouse press.", "inputSchema": {"type": "object", "properties": {"cell": cell, "normal": cell}, "required": ["cell"]}},
 		{"name": "update_stroke", "description": "Move an active stroke to cell; paints/erases along the way, or drags a box tool's far corner.", "inputSchema": {"type": "object", "properties": {"cell": cell}, "required": ["cell"]}},
 		{"name": "end_stroke", "description": "Commit the active stroke as one undo step (like releasing LMB).", "inputSchema": {"type": "object", "properties": {}}},

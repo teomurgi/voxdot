@@ -7,26 +7,27 @@ extends Node3D
 ## tools, hover preview and UI.
 ##
 ## Controls: LMB tool | MMB/RMB orbit | Shift+MMB/RMB pan | wheel zoom
-## 1-9 tools, 0 Prefab | H height lock, [ ] layer down/up | X/Z mirror | Q/E rotate view | P ortho | G grid | F reframe
+## 1-9 tools, 0 Prefab, M Material | H height lock, [ ] layer down/up | X/Z mirror | Q/E rotate view | P ortho | G grid | F reframe
 ## B catalogue | R rotate prefab | Ctrl+D duplicate prefab | Delete prefab/light | Esc cancel
 ## Ctrl+Z / Ctrl+Shift+Z undo/redo | Ctrl+N/O/S new/open/save (+Shift = save as)
 
 ## PREFAB is appended (not first) so the existing 1–9 shortcuts keep their
 ## tool; the Prefab tool itself is on `0`.
-enum Tool { PLACE, ERASE, PAINT, PICK, BOX, BOX_ERASE, FILL, LIGHT_PLACE, LIGHT_EDIT, PREFAB }
+enum Tool { PLACE, ERASE, PAINT, PICK, BOX, BOX_ERASE, FILL, LIGHT_PLACE, LIGHT_EDIT, PREFAB, MATERIAL }
 
-const TOOL_NAMES: Array[String] = ["Place", "Erase", "Paint", "Pick", "Box", "Box Erase", "Fill", "Light", "Edit Light", "Prefab"]
+const TOOL_NAMES: Array[String] = ["Place", "Erase", "Paint", "Pick", "Box", "Box Erase", "Fill", "Light", "Edit Light", "Prefab", "Material"]
 const TOOL_HINTS: Array[String] = [
 	"Click/drag to add voxels",
 	"Click/drag to remove voxels",
 	"Click/drag to recolor existing voxels",
-	"Click a voxel to pick its color",
+	"Click a voxel to pick its color and material",
 	"Drag a rectangle; Box depth extrudes it",
 	"Drag a rectangle into the model; Box depth sets how deep",
 	"Recolor all connected voxels of the same color",
 	"Click to add a point light; drag on the work plane to position it",
 	"Click a light handle to select it; drag to move it; Delete removes it",
 	"Click an instance to select; drag to move; R rotate; Ctrl+D duplicate; B catalogue",
+	"Click/drag to apply the active material and overrides",
 ]
 const APP_TITLE: String = "Voxdot"
 const LEFT_PANEL_WIDTH: int = 264
@@ -35,6 +36,8 @@ const RIGHT_PANEL_WIDTH: int = 352
 var doc := VoxelDocument.new()
 var current_tool: Tool = Tool.PLACE
 var color: Color = Color("c2c7d1")
+var current_material: int = VoxelMaterial.Kind.DEFAULT
+var current_material_overrides: int = 0
 var box_depth: int = 1
 var grid_visible: bool = true
 var height_lock: bool = false
@@ -129,6 +132,10 @@ var _stroke_mouse_driven: bool = false
 var _tool_buttons: Array[Button] = []
 var _color_button: ColorPickerButton
 var _swatch_grid: GridContainer
+var _material_buttons: Array[Button] = []
+var _material_info_label: Label
+var _solid_override_option: OptionButton
+var _walkable_override_option: OptionButton
 var _mirror_x_check: CheckButton
 var _mirror_z_check: CheckButton
 var _depth_spin: SpinBox
@@ -926,8 +933,16 @@ func _begin_stroke(h: Dictionary) -> void:
 		Tool.PICK:
 			# Pick may sample linked content; it never selects or unpacks.
 			if doc.grid.has(cell):
+				_set_material(doc.material_at(cell))
+				var local_bits: int = doc.material_override_at(cell)
+				_set_material_overrides(VoxelMaterial.solid_override(local_bits),
+					VoxelMaterial.walkable_override(local_bits))
 				_set_color(doc.grid[cell])
 			elif doc.prefab_composition.has_cell(cell):
+				_set_material(doc.prefab_composition.material_at(cell))
+				var linked_bits: int = doc.prefab_composition.override_at(cell)
+				_set_material_overrides(VoxelMaterial.solid_override(linked_bits),
+					VoxelMaterial.walkable_override(linked_bits))
 				_set_color(doc.prefab_composition.color_at(cell))
 			return
 		Tool.FILL:
@@ -936,7 +951,7 @@ func _begin_stroke(h: Dictionary) -> void:
 				return
 			doc.paint_cells(doc.flood_cells(cell), color)
 			return
-		Tool.ERASE, Tool.PAINT:
+		Tool.ERASE, Tool.PAINT, Tool.MATERIAL:
 			if doc.prefab_composition.has_cell(cell):
 				_say("Linked prefab: unpack to edit")
 				return
@@ -962,11 +977,13 @@ func _apply_cell(cell: Vector3i) -> void:
 	var one: Array[Vector3i] = [cell]
 	match _stroke_tool:
 		Tool.PLACE:
-			doc.place_cells(one, color)
+			doc.place_cells(one, color, current_material, current_material_overrides)
 		Tool.ERASE:
 			doc.erase_cells(one)
 		Tool.PAINT:
 			doc.paint_cells(one, color)
+		Tool.MATERIAL:
+			doc.paint_material(one, current_material, current_material_overrides)
 
 
 func _update_stroke(origin: Vector3, dir: Vector3) -> void:
@@ -1020,7 +1037,7 @@ func _finish_stroke() -> void:
 			_last_cell = Vector3i(-1, -1, -1)
 			return
 		if _stroke_tool == Tool.BOX:
-			doc.place_cells(cells, color)
+			doc.place_cells(cells, color, current_material, current_material_overrides)
 		else:
 			doc.erase_cells(cells)
 	doc.end_stroke()
@@ -1346,6 +1363,124 @@ func _sync_sun_ui() -> void:
 	_sun_color_button.color = doc.sun_color
 	_sun_shadows_check.set_pressed_no_signal(doc.sun_shadows)
 	_syncing_ui = false
+
+
+func _build_material_ui(parent: VBoxContainer) -> void:
+	var body := _section(parent, "Material")
+	var grid := GridContainer.new()
+	grid.columns = 5
+	grid.add_theme_constant_override("h_separation", 3)
+	grid.add_theme_constant_override("v_separation", 3)
+	body.add_child(grid)
+	for i in VoxelMaterial.count():
+		var b := Button.new()
+		b.toggle_mode = true
+		b.focus_mode = Control.FOCUS_NONE
+		b.custom_minimum_size = Vector2(52, 26)
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.text = VoxelMaterial.display_name(i)
+		b.add_theme_font_size_override("font_size", 10)
+		var tags_text: String = ", ".join(VoxelMaterial.tags(i))
+		b.tooltip_text = "%s\nSolid: %s · Walkable: %s\nTags: %s" % [
+			VoxelMaterial.display_name(i),
+			"yes" if VoxelMaterial.base_solid(i) else "no",
+			"yes" if VoxelMaterial.base_walkable(i) else "no", tags_text]
+		var c: Color = VoxelMaterial.color(i)
+		var text_color: Color = Color.WHITE if c.get_luminance() < 0.55 else Color(0.08, 0.08, 0.1)
+		b.add_theme_color_override("font_color", text_color)
+		b.add_theme_color_override("font_pressed_color", text_color)
+		b.add_theme_color_override("font_hover_color", text_color)
+		for state: String in ["normal", "hover", "pressed", "focus"]:
+			var sb := StyleBoxFlat.new()
+			sb.bg_color = c if state != "hover" else c.lightened(0.18)
+			sb.set_border_width_all(1)
+			sb.border_color = Color(0, 0, 0, 0.6) if state != "focus" else Color.WHITE
+			b.add_theme_stylebox_override(state, sb)
+		b.pressed.connect(_set_material.bind(i))
+		grid.add_child(b)
+		_material_buttons.append(b)
+	_material_info_label = Label.new()
+	_material_info_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_material_info_label.add_theme_font_size_override("font_size", 12)
+	body.add_child(_material_info_label)
+	var solid_row := HBoxContainer.new()
+	body.add_child(solid_row)
+	solid_row.add_child(_label("Solid"))
+	_solid_override_option = OptionButton.new()
+	_solid_override_option.focus_mode = Control.FOCUS_NONE
+	_solid_override_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_solid_override_option.add_item("Material default", VoxelMaterial.Override.INHERIT)
+	_solid_override_option.add_item("Solid", VoxelMaterial.Override.ON)
+	_solid_override_option.add_item("Non-solid", VoxelMaterial.Override.OFF)
+	_solid_override_option.item_selected.connect(func(_i: int) -> void: _on_material_override_changed())
+	solid_row.add_child(_solid_override_option)
+	var walkable_row := HBoxContainer.new()
+	body.add_child(walkable_row)
+	walkable_row.add_child(_label("Walkable"))
+	_walkable_override_option = OptionButton.new()
+	_walkable_override_option.focus_mode = Control.FOCUS_NONE
+	_walkable_override_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_walkable_override_option.add_item("Material default", VoxelMaterial.Override.INHERIT)
+	_walkable_override_option.add_item("Walkable", VoxelMaterial.Override.ON)
+	_walkable_override_option.add_item("Not walkable", VoxelMaterial.Override.OFF)
+	_walkable_override_option.item_selected.connect(func(_i: int) -> void: _on_material_override_changed())
+	walkable_row.add_child(_walkable_override_option)
+	var note := Label.new()
+	note.text = "Place uses the active material. Material repaints existing voxels."
+	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	note.add_theme_font_size_override("font_size", 11)
+	note.add_theme_color_override("font_color", Color(0.65, 0.7, 0.8))
+	body.add_child(note)
+	_sync_material_ui()
+
+
+func _sync_material_ui() -> void:
+	if _material_info_label == null:
+		return
+	_syncing_ui = true
+	for i in _material_buttons.size():
+		_material_buttons[i].set_pressed_no_signal(i == current_material)
+	var solid: bool = VoxelMaterial.is_solid(current_material, current_material_overrides)
+	var walkable: bool = VoxelMaterial.is_walkable(current_material, current_material_overrides)
+	var tags: PackedStringArray = VoxelMaterial.tags(current_material)
+	var override_note: String = ""
+	if VoxelMaterial.solid_override(current_material_overrides) != VoxelMaterial.Override.INHERIT \
+			or VoxelMaterial.walkable_override(current_material_overrides) != VoxelMaterial.Override.INHERIT:
+		override_note = " (overridden)"
+	_material_info_label.text = "%s · %s · %s%s\nTags: %s" % [
+		VoxelMaterial.display_name(current_material),
+		"solid" if solid else "non-solid",
+		"walkable" if walkable else "not walkable",
+		override_note, ", ".join(tags)]
+	_solid_override_option.select(_solid_override_option.get_item_index(
+		VoxelMaterial.solid_override(current_material_overrides)))
+	_walkable_override_option.select(_walkable_override_option.get_item_index(
+		VoxelMaterial.walkable_override(current_material_overrides)))
+	_syncing_ui = false
+
+
+func _set_material(kind: int) -> void:
+	kind = clampi(kind, 0, VoxelMaterial.count() - 1)
+	if kind == current_material:
+		_sync_material_ui()
+		return
+	var was_default_color: bool = color.is_equal_approx(VoxelMaterial.color(current_material))
+	current_material = kind
+	if was_default_color:
+		_set_color(VoxelMaterial.color(kind))
+	_sync_material_ui()
+
+
+func _set_material_overrides(solid: int, walkable: int) -> void:
+	current_material_overrides = VoxelMaterial.make_overrides(solid, walkable)
+	_sync_material_ui()
+
+
+func _on_material_override_changed() -> void:
+	if _syncing_ui:
+		return
+	_set_material_overrides(_solid_override_option.get_selected_id(),
+		_walkable_override_option.get_selected_id())
 
 
 ## Compact action/status surface for prefabs. The visual browser lives in
@@ -2017,6 +2152,10 @@ func _handle_key(k: InputEventKey) -> bool:
 		KEY_8: _set_tool(Tool.LIGHT_PLACE)
 		KEY_9: _set_tool(Tool.LIGHT_EDIT)
 		KEY_0: _set_tool(Tool.PREFAB)
+		KEY_M:
+			if _text_field_focused():
+				return false
+			_set_tool(Tool.MATERIAL)
 		KEY_B:
 			if _text_field_focused():
 				return false
@@ -2346,7 +2485,11 @@ func _build_ui() -> void:
 	tool_body.add_child(tools)
 	for i in TOOL_NAMES.size():
 		var b := Button.new()
-		var key_label: String = "0" if i == int(Tool.PREFAB) else str(i + 1)
+		var key_label: String = str(i + 1)
+		if i == int(Tool.PREFAB):
+			key_label = "0"
+		elif i == int(Tool.MATERIAL):
+			key_label = "M"
 		b.text = "%s %s" % [key_label, TOOL_NAMES[i]]
 		b.toggle_mode = true
 		b.focus_mode = Control.FOCUS_NONE
@@ -2422,6 +2565,8 @@ func _build_ui() -> void:
 	var add_swatch := _button("+ Add current color to palette", func() -> void: doc.add_swatch(color))
 	color_body.add_child(add_swatch)
 
+	_build_material_ui(vb)
+
 	var view_body := _section(vb, "View")
 	var view_row := HBoxContainer.new()
 	view_body.add_child(view_row)
@@ -2446,7 +2591,7 @@ func _build_ui() -> void:
 
 	var help_body := _section(vb, "Help", false)
 	var help_text := Label.new()
-	help_text.text = "Mouse\nLMB tool · MMB/RMB orbit\nShift+MMB/RMB pan · Wheel zoom\n\nKeyboard\nWASD fly · Space/C up/down · Shift fast\n1-9 tools · 0 Prefab · B catalogue\nR rotate prefab · Ctrl+D duplicate\nDelete deletes prefab or light\nQ/E rotate view · G grid\nH height lock · [ ] layer up/down\nCtrl+Z/Y undo/redo · Ctrl+S save\n(Cmd instead of Ctrl on macOS)"
+	help_text.text = "Mouse\nLMB tool · MMB/RMB orbit\nShift+MMB/RMB pan · Wheel zoom\n\nKeyboard\nWASD fly · Space/C up/down · Shift fast\n1-9 tools · 0 Prefab · M Material · B catalogue\nR rotate prefab · Ctrl+D duplicate\nDelete deletes prefab or light\nQ/E rotate view · G grid\nH height lock · [ ] layer up/down\nCtrl+Z/Y undo/redo · Ctrl+S save\n(Cmd instead of Ctrl on macOS)"
 	help_text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	help_text.add_theme_font_size_override("font_size", 12)
 	help_text.add_theme_color_override("font_color", Color(0.7, 0.75, 0.85))

@@ -6,8 +6,11 @@ extends Resource
 ## position p occupies [p * voxel_size, (p + 1) * voxel_size].
 ##
 ## Voxels are packed as `cells = [x, y, z, palette_index, ...]` with a shared
-## `palette`, which keeps .tres files compact. `swatches` is the editor's
-## user-facing quick palette and does not affect rendering.
+## `palette`, which keeps .tres files compact. Optional `material_ids` and
+## `material_overrides` byte arrays are aligned with that cell order; leaving
+## them empty means every voxel uses the default solid/walkable material, so
+## old files load unchanged. `swatches` is the editor's user-facing quick
+## palette and does not affect rendering.
 
 ## Voxels are packed as `cells = [x, y, z, palette_index, ...]` with a shared
 ## `palette`, which keeps .tres files compact. Point lights use the optional
@@ -17,6 +20,12 @@ extends Resource
 @export var swatches: PackedColorArray = PackedColorArray()
 @export var palette: PackedColorArray = PackedColorArray()
 @export var cells: PackedInt32Array = PackedInt32Array()
+## Optional per-voxel material IDs (VoxelMaterial.Kind), aligned with `cells`.
+## Empty means every voxel uses the default material, so old files load unchanged.
+@export var material_ids: PackedByteArray = PackedByteArray()
+## Optional per-voxel solid/walkable overrides aligned with `cells`. Empty means
+## every voxel inherits its material's flags. See VoxelMaterial.make_overrides().
+@export var material_overrides: PackedByteArray = PackedByteArray()
 ## id, x, y, z, red, green, blue, energy, range, shadows per point light.
 ## Positions and ranges are in voxel units, like the editor; runtime instances
 ## scale them by voxel_size. IDs are stable across save/open and undo/redo.
@@ -67,12 +76,39 @@ func to_grid() -> Dictionary:
 ## Replaces the stored voxels with `grid`. Output is sorted (y, z, x) so
 ## saved files diff cleanly in version control.
 func set_grid(grid: Dictionary) -> void:
+	set_cells(grid)
+
+
+## Replaces the stored voxels with `grid` plus sparse material/override maps.
+## Material arrays are only written when at least one voxel differs from the
+## defaults, keeping old-style files compact.
+func set_cells(grid: Dictionary, material_grid: Dictionary = {}, override_grid: Dictionary = {}) -> void:
 	var keys: Array = grid.keys()
 	keys.sort_custom(_cell_less)
 	var new_palette := PackedColorArray()
 	var lookup: Dictionary = {}
 	var out := PackedInt32Array()
 	out.resize(keys.size() * 4)
+	# Fast path: all-default metadata writes no arrays, so big color-only
+	# models never pay for transient per-voxel byte buffers.
+	var sparse_mats: Dictionary = {}
+	var sparse_ovs: Dictionary = {}
+	for p: Vector3i in material_grid:
+		var k: int = clampi(int(material_grid[p]), 0, VoxelMaterial.count() - 1)
+		if k != VoxelMaterial.Kind.DEFAULT:
+			sparse_mats[p] = k
+	for p: Vector3i in override_grid:
+		var b: int = int(override_grid[p]) & 0xFF
+		if b != 0:
+			sparse_ovs[p] = b
+	var any_material: bool = not sparse_mats.is_empty()
+	var any_override: bool = not sparse_ovs.is_empty()
+	var mats := PackedByteArray()
+	var ovs := PackedByteArray()
+	if any_material:
+		mats.resize(keys.size())
+	if any_override:
+		ovs.resize(keys.size())
 	var o: int = 0
 	for p: Vector3i in keys:
 		var c: Color = grid[p]
@@ -83,9 +119,43 @@ func set_grid(grid: Dictionary) -> void:
 		out[o + 1] = p.y
 		out[o + 2] = p.z
 		out[o + 3] = lookup[c]
+		var idx: int = o >> 2
+		if any_material:
+			mats[idx] = int(sparse_mats.get(p, VoxelMaterial.Kind.DEFAULT))
+		if any_override:
+			ovs[idx] = int(sparse_ovs.get(p, 0))
 		o += 4
 	palette = new_palette
 	cells = out
+	material_ids = mats if any_material else PackedByteArray()
+	material_overrides = ovs if any_override else PackedByteArray()
+
+
+## Sparse { Vector3i: material Kind } for voxels that do not use the default.
+func to_material_grid() -> Dictionary:
+	var out: Dictionary = {}
+	var n: int = voxel_count()
+	if material_ids.size() != n:
+		return out
+	for i in n:
+		var kind: int = int(material_ids[i])
+		if kind != VoxelMaterial.Kind.DEFAULT:
+			out[Vector3i(cells[i * 4], cells[i * 4 + 1], cells[i * 4 + 2])] = kind
+	return out
+
+
+## Sparse { Vector3i: override bits } for voxels with explicit solid/walkable
+## overrides.
+func to_override_grid() -> Dictionary:
+	var out: Dictionary = {}
+	var n: int = voxel_count()
+	if material_overrides.size() != n:
+		return out
+	for i in n:
+		var bits: int = int(material_overrides[i])
+		if bits != 0:
+			out[Vector3i(cells[i * 4], cells[i * 4 + 1], cells[i * 4 + 2])] = bits
+	return out
 
 
 ## Builds a render mesh at this model's real-world voxel size. Prefab
@@ -110,6 +180,105 @@ func build_composed_grid() -> Dictionary:
 			if not grid.has(world):
 				grid[world] = src[c]
 	return grid
+
+
+## Composed colors, materials and overrides in one pass. Local cells win over
+## instance cells, and earlier instances win over later ones, matching
+## build_composed_grid(). The sparse material/override maps only contain
+## non-default values.
+func build_composed_data() -> Dictionary:
+	var colors: Dictionary = to_grid()
+	var materials: Dictionary = to_material_grid()
+	var overrides: Dictionary = to_override_grid()
+	for inst: VoxelPrefabInstance in prefab_instances:
+		if inst == null or inst.source == null or not inst.source.prefab_instances.is_empty():
+			continue
+		var src_colors: Dictionary = inst.source.to_grid()
+		var src_materials: Dictionary = inst.source.to_material_grid()
+		var src_overrides: Dictionary = inst.source.to_override_grid()
+		for c: Vector3i in src_colors:
+			var world: Vector3i = inst.anchor + VoxelPrefabInstance.cell_offset(
+					c, inst.pivot, inst.yaw_quarters)
+			if colors.has(world):
+				continue
+			colors[world] = src_colors[c]
+			if src_materials.has(c):
+				materials[world] = src_materials[c]
+			if src_overrides.has(c):
+				overrides[world] = src_overrides[c]
+	return {"colors": colors, "materials": materials, "overrides": overrides}
+
+
+func material_kind_at(cell: Vector3i, data: Dictionary = {}) -> int:
+	if data.is_empty():
+		data = build_composed_data()
+	if not (data.get("colors", {}) as Dictionary).has(cell):
+		return VoxelMaterial.Kind.DEFAULT
+	return int((data.get("materials", {}) as Dictionary).get(cell, VoxelMaterial.Kind.DEFAULT))
+
+
+func material_override_at(cell: Vector3i, data: Dictionary = {}) -> int:
+	if data.is_empty():
+		data = build_composed_data()
+	return int((data.get("overrides", {}) as Dictionary).get(cell, 0))
+
+
+func is_solid_cell(cell: Vector3i, data: Dictionary = {}) -> bool:
+	if data.is_empty():
+		data = build_composed_data()
+	if not (data.get("colors", {}) as Dictionary).has(cell):
+		return false
+	return VoxelMaterial.is_solid(material_kind_at(cell, data), material_override_at(cell, data))
+
+
+## A walkable surface is a solid, walkable cell whose cell above is not solid.
+## Steps/ramps are represented by adjacent surface cells; the caller's nav
+## system decides whether the height change is traversable.
+func is_walkable_cell(cell: Vector3i, data: Dictionary = {}) -> bool:
+	if data.is_empty():
+		data = build_composed_data()
+	if not (data.get("colors", {}) as Dictionary).has(cell):
+		return false
+	var kind: int = material_kind_at(cell, data)
+	var bits: int = material_override_at(cell, data)
+	if not VoxelMaterial.is_solid(kind, bits) or not VoxelMaterial.is_walkable(kind, bits):
+		return false
+	var above: Vector3i = cell + Vector3i.UP
+	if not (data.get("colors", {}) as Dictionary).has(above):
+		return true
+	return not is_solid_cell(above, data)
+
+
+## Every top-surface cell that a walker can stand on. Returns cells, not world
+## coordinates; multiply by voxel_size in the game.
+func walkable_cells() -> Array[Vector3i]:
+	var data: Dictionary = build_composed_data()
+	var out: Array[Vector3i] = []
+	for cell: Vector3i in data["colors"]:
+		if is_walkable_cell(cell, data):
+			out.append(cell)
+	return out
+
+
+## Cells that should contribute collision. Non-solid materials (water, etc.)
+## are rendered but omitted here.
+func build_solid_grid() -> Dictionary:
+	var data: Dictionary = build_composed_data()
+	var colors: Dictionary = data["colors"]
+	var out: Dictionary = {}
+	for cell: Vector3i in colors:
+		if is_solid_cell(cell, data):
+			out[cell] = colors[cell]
+	return out
+
+
+## Render mesh for collision only. Returns an empty ArrayMesh when the model
+## has no solid cells.
+func build_collision_mesh() -> ArrayMesh:
+	var solid: Dictionary = build_solid_grid()
+	if solid.is_empty():
+		return ArrayMesh.new()
+	return VoxelMeshBuilder.build_mesh(solid, voxel_size)
 
 
 ## Local lights plus transformed instance lights. Local IDs are kept; instance

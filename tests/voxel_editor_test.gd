@@ -39,6 +39,7 @@ func _run() -> void:
 	_test_fit_bounds()
 	_test_sun_shadows()
 	_test_atmosphere()
+	_test_materials_editor()
 	await _test_lights_editor()
 	await _test_mesh_and_file()
 	_test_standalone()
@@ -191,7 +192,7 @@ func _test_panel_layout() -> void:
 		return
 	var left_names: Array[String] = _header_names(left)
 	var right_names: Array[String] = _header_names(right)
-	_check(left_names == ["File", "Model", "Tool", "Color", "View", "Help"],
+	_check(left_names == ["File", "Model", "Tool", "Color", "Material", "View", "Help"],
 			"left panel sections: " + str(left_names))
 	_check(right_names == ["Sun (directional)", "Atmosphere", "Lighting — point lights", "Prefabs"],
 			"right panel sections: " + str(right_names))
@@ -285,6 +286,48 @@ func _test_atmosphere() -> void:
 	_check(is_equal_approx(_ed.world_environment.ambient_light_energy, 0.5), "atmosphere restores")
 
 
+func _test_materials_editor() -> void:
+	print("material tool")
+	_ed.doc.reset()
+	_ed._set_material(VoxelMaterial.Kind.STONE)
+	_ed._set_material_overrides(VoxelMaterial.Override.INHERIT, VoxelMaterial.Override.INHERIT)
+	_ed._set_tool(VoxelModelEditor.Tool.PLACE)
+	_click(Vector3(5.5, 0.0, 5.5))
+	_check(_ed.doc.material_at(Vector3i(5, 0, 5)) == VoxelMaterial.Kind.STONE,
+		"Place uses the active material")
+	_ed._set_material(VoxelMaterial.Kind.WATER)
+	_ed._set_tool(VoxelModelEditor.Tool.MATERIAL)
+	_click(Vector3(5.5, 0.5, 5.5))
+	_check(_ed.doc.material_at(Vector3i(5, 0, 5)) == VoxelMaterial.Kind.WATER,
+		"Material tool repaints an existing voxel")
+	_check(not _ed.doc.is_solid_cell(Vector3i(5, 0, 5)), "water is non-solid")
+	_ed._set_material_overrides(VoxelMaterial.Override.ON, VoxelMaterial.Override.ON)
+	_click(Vector3(5.5, 0.5, 5.5))
+	_check(_ed.doc.is_solid_cell(Vector3i(5, 0, 5)) and _ed.doc.is_walkable_cell(Vector3i(5, 0, 5)),
+		"Material tool applies overrides")
+	_ed._set_tool(VoxelModelEditor.Tool.PICK)
+	_click(Vector3(5.5, 0.5, 5.5))
+	_check(_ed.current_material == VoxelMaterial.Kind.WATER, "Pick samples the material")
+	_check(VoxelMaterial.solid_override(_ed.current_material_overrides) == VoxelMaterial.Override.ON
+		and VoxelMaterial.walkable_override(_ed.current_material_overrides) == VoxelMaterial.Override.ON,
+		"Pick samples the overrides")
+	_check(_ed._material_buttons[VoxelMaterial.Kind.WATER].button_pressed,
+		"palette reflects the sampled material")
+	_check(_ed._tool_buttons[int(VoxelModelEditor.Tool.MATERIAL)].text.begins_with("M "),
+		"Material tool has the M shortcut")
+	# Pick on linked content samples the source material, not whatever was active.
+	var src := VoxelModel.new()
+	src.set_cells({Vector3i(0, 0, 0): Color.RED}, {Vector3i(0, 0, 0): VoxelMaterial.Kind.GLASS}, {})
+	var placed: Dictionary = _ed.doc.place_prefab(src, "glass.tres", "glass-asset",
+		Vector3(0.5, 0, 0.5), Vector3i(10, 0, 10), 0)
+	_check(bool(placed.get("ok", false)), "prefab placed for Pick check")
+	_ed._set_material(VoxelMaterial.Kind.STONE)
+	_ed._set_material_overrides(VoxelMaterial.Override.INHERIT, VoxelMaterial.Override.INHERIT)
+	_click(Vector3(10.5, 0.5, 10.5))
+	_check(_ed.current_material == VoxelMaterial.Kind.GLASS, "Pick samples linked material")
+	_check(_ed.doc.prefab_composition.has_cell(Vector3i(10, 0, 10)), "picked cell is still linked")
+
+
 func _test_lights_editor() -> void:
 	print("lights editor")
 	_ed.doc.reset()
@@ -373,6 +416,29 @@ func _test_mesh_and_file() -> void:
 	root.add_child(inst)
 	await process_frame
 	_check(inst.get_node_or_null("Mesh") != null and inst.get_node_or_null("Collision") != null, "VoxelModelInstance builds mesh + collision")
+	# Material-aware collision: solid materials collide, water does not.
+	var mixed_doc := VoxelDocument.new()
+	mixed_doc.place_cells([Vector3i(0, 0, 0)] as Array[Vector3i], Color.RED, VoxelMaterial.Kind.STONE)
+	mixed_doc.place_cells([Vector3i(1, 0, 0)] as Array[Vector3i], Color.BLUE, VoxelMaterial.Kind.WATER)
+	var mixed_inst := VoxelModelInstance.new()
+	mixed_inst.model = mixed_doc.to_model()
+	mixed_inst.with_collision = true
+	root.add_child(mixed_inst)
+	await process_frame
+	_check(mixed_inst.get_node_or_null("Collision") != null, "collision mesh includes solid cells")
+	_check(mixed_inst.is_solid_cell(Vector3i.ZERO) and not mixed_inst.is_solid_cell(Vector3i(1, 0, 0)),
+		"runtime solid query follows materials")
+	_check(mixed_inst.walkable_cells().has(Vector3i.ZERO), "runtime walkable cells query")
+	var water_doc := VoxelDocument.new()
+	water_doc.place_cells([Vector3i(0, 0, 0)] as Array[Vector3i], Color.BLUE, VoxelMaterial.Kind.WATER)
+	var water_inst := VoxelModelInstance.new()
+	water_inst.model = water_doc.to_model()
+	water_inst.with_collision = true
+	root.add_child(water_inst)
+	await process_frame
+	_check(water_inst.get_node_or_null("Collision") == null, "non-solid voxels produce no collision body")
+	mixed_inst.queue_free()
+	water_inst.queue_free()
 	_ed.doc.reset()
 	_ed.doc.place_cells([Vector3i(4, 0, 4)] as Array[Vector3i], Color.RED)
 	_ed.doc.add_light({"position": Vector3(4.5, 2.0, 4.5), "color": Color("ffcc88"), "energy": 3.0, "range": 10.0})

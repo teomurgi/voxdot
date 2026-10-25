@@ -31,6 +31,9 @@ extends Node3D
 			rebuild()
 
 var _built: bool = false
+var _cell_data: Dictionary = {}
+var _walkable: Array[Vector3i] = []
+var _walkable_built: bool = false
 
 
 func _ready() -> void:
@@ -42,6 +45,9 @@ func rebuild() -> void:
 	for child: Node in get_children():
 		remove_child(child)
 		child.queue_free()
+	_cell_data = {}
+	_walkable.clear()
+	_walkable_built = false
 	if model == null:
 		return
 	var mi := MeshInstance3D.new()
@@ -52,14 +58,53 @@ func rebuild() -> void:
 	_add_missing_debug()
 	if not with_collision or Engine.is_editor_hint():
 		return
-	if mi.mesh == null or mi.mesh.get_surface_count() == 0:
+	var collision_mesh: ArrayMesh = model.build_collision_mesh()
+	if collision_mesh == null or collision_mesh.get_surface_count() == 0:
 		return
 	var body := StaticBody3D.new()
 	body.name = "Collision"
 	var shape := CollisionShape3D.new()
-	shape.shape = mi.mesh.create_trimesh_shape()
+	shape.shape = collision_mesh.create_trimesh_shape()
 	body.add_child(shape)
 	add_child(body)
+
+
+## Cached composed colors/materials/overrides for runtime queries.
+func cell_data() -> Dictionary:
+	if _cell_data.is_empty() and model != null:
+		_cell_data = model.build_composed_data()
+	return _cell_data
+
+
+func material_kind_at(cell: Vector3i) -> int:
+	if model == null:
+		return VoxelMaterial.Kind.DEFAULT
+	return model.material_kind_at(cell, cell_data())
+
+
+func material_override_at(cell: Vector3i) -> int:
+	if model == null:
+		return 0
+	return model.material_override_at(cell, cell_data())
+
+
+func is_solid_cell(cell: Vector3i) -> bool:
+	return model != null and model.is_solid_cell(cell, cell_data())
+
+
+func is_walkable_cell(cell: Vector3i) -> bool:
+	return model != null and model.is_walkable_cell(cell, cell_data())
+
+
+## Top-surface cells a walker can stand on. Cached until the next rebuild().
+func walkable_cells() -> Array[Vector3i]:
+	if not _walkable_built:
+		if model != null:
+			_walkable = model.walkable_cells()
+		else:
+			_walkable = []
+		_walkable_built = true
+	return _walkable
 
 
 ## Warns once per unresolved instance and optionally draws its snapshot AABB.

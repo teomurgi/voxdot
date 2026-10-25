@@ -115,13 +115,14 @@ Standalone voxel model editor on **Godot 4.7.2** (system binary `/usr/bin/godot`
     all-or-nothing on transform. Prefab undo lives in a `"prefabs"` namespace next to `"voxels"`/`"lights"`.
     `source_bounds` is the occupied-cell AABB snapshot (not the source's editable `bounds`) and drives red
     placeholders. No nesting: a source containing instances is refused.
-14. **Prefab UI/tool**: `Tool.PREFAB` is appended (value 9) so shortcuts 1–9 keep their tools; the Prefab tool
-    is on `0`. Drags lock to the grabbed face plane (same rule as voxel strokes), *not* a camera-facing plane,
-    or sideways drags sink the instance in Y. Switching to any non-Prefab tool clears `selected_prefab_id` and
-    the selection outline (armed catalogue assets survive). A `Window` added to the tree is visible by default
-    and swallows viewport input in headless tests — instantiate `VoxelPrefabCatalogDialog` hidden. Catalogue
-    metadata is in `<library>/.voxdot/catalogue.cfg`; `VoxelPrefabCatalog.user_library_override` keeps tests
-    out of the real `~/Documents/Voxdot/Prefabs`.
+14. **Prefab UI/tool**: `Tool.PREFAB` is appended (value 9) and `Tool.MATERIAL` after it (value 10) so
+    shortcuts 1–9 keep their tools; the Prefab tool is on `0` and Material on `M`. Drags lock to the grabbed
+    face plane (same rule as voxel strokes), *not* a camera-facing plane, or sideways drags sink the instance
+    in Y. Switching to any non-Prefab tool clears `selected_prefab_id` and the selection outline (armed
+    catalogue assets survive). A `Window` added to the tree is visible by default and swallows viewport input
+    in headless tests — instantiate `VoxelPrefabCatalogDialog` hidden. Catalogue metadata is in
+    `<library>/.voxdot/catalogue.cfg`; `VoxelPrefabCatalog.user_library_override` keeps tests out of the real
+    `~/Documents/Voxdot/Prefabs`.
 15. **Prefab lights & unpack**: instance lights render in a separate `PrefabLights` group owned by
     `VoxelPrefabRig`; parent lights stay in `doc.lights`. The soft budget (`prefab_light_budget`, default 64)
     only warns/asks for `allow_over_budget`; no light is dropped. Unpack writes voxels + lights atomically and
@@ -154,3 +155,21 @@ Standalone voxel model editor on **Godot 4.7.2** (system binary `/usr/bin/godot`
     so a 512³/1024³ model viewed from farther away shows no cast shadows even with `shadow_enabled = true`.
     `_apply_environment()` sets it to `min(max(100, bounds.length() * 1.5), camera.far)`; otherwise the
     "Sun casts shadows" toggle appears broken on the pagoda-scale examples.
+21. **Voxel materials**: `VoxelMaterial` is a static registry of nine built-in IDs; `VoxelModel.material_ids`
+    and `material_overrides` are optional byte arrays aligned with the sorted `cells` order (empty = all
+    default/inherit, so old files load unchanged). `VoxelDocument` keeps sparse `cell_materials` /
+    `cell_overrides` dictionaries and a separate `"materials"` undo namespace. `_write()` takes optional
+    material/override values (`null` preserves them); color paint keeps metadata, erase clears it. Walkability
+    is derived from solid + walkable materials with no solid cell above, not stored per voxel. Runtime
+    collision uses `build_collision_mesh()` (solid cells only), and `VoxelModelInstance` caches composed cell
+    data for `is_solid_cell()`/`is_walkable_cell()`/`walkable_cells()`.
+22. **Prefab-first example scenes** (`tools/build_valley_512.py`): the parent holds ONLY terrain heightfield +
+    water; every structure is a linked prefab source. Pads are terrain shaping done BEFORE emission
+    (`RESERVES` consulted by `surface_h()`), so local writes stay heightfield-only. Prefab sources never
+    contain cells below y=0 — anchors sit foundations ON pads instead of burying them. Corner-based sources
+    (cabin/bridge) use pivot `(0,0,0)` plus a design `margin` shifted with `_ORIGIN` at build time and
+    subtracted back in `place()` (yaw-0 only). Instance footprints must clear terrain: pads hug footprints
+    with a 1-cell skirt, slope fill never rises above a reserved neighbour (`emit_terrain_band`), and pads
+    must not overlap with different tops (`reserve_at` returns the first match — a lower yard pad overlapping
+    a higher cabin pad buries the yard instance). All-or-nothing placement refuses any overlap, so validate
+    footprints offline (local cells + pivot/yaw math) before the long MCP build.
