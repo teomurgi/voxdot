@@ -172,4 +172,6 @@ Standalone voxel model editor on **Godot 4.7.2** (system binary `/usr/bin/godot`
     with a 1-cell skirt, slope fill never rises above a reserved neighbour (`emit_terrain_band`), and pads
     must not overlap with different tops (`reserve_at` returns the first match — a lower yard pad overlapping
     a higher cabin pad buries the yard instance). All-or-nothing placement refuses any overlap, so validate
-    footprints offline (local cells + pivot/yaw math) before the long MCP build.
+    footprints offline (local cells + pivot/yaw math) before the long MCP build. `open()` resets the editor
+    camera, so builder scripts must re-apply hero framing (and wait for chunk rebuilds) after the reload check
+    before capturing the shipped screenshot — otherwise the PNG is a black frame.
