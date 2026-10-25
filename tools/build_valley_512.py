@@ -930,6 +930,15 @@ def main():
         raise RuntimeError(f"reload lost prefabs: {state}")
     if int(state["prefab_counts"].get("ok", 0)) != state["prefab_instances"]:
         raise RuntimeError(f"some reloaded instances invalid: {state['prefab_counts']}")
+    # Re-frame: open() resets the camera, so re-apply the hero framing and
+    # let chunk rebuilds settle before capturing the shipped screenshot.
+    call("set_grid_visible", {"visible": False})
+    call("set_orthographic", {"on": False})
+    call("frame")
+    call("set_camera", {"yaw": 38, "pitch": -24, "distance": 260})
+    call("pan", {"dx": 0, "dy": -30})
+    call("zoom", {"steps": 2})
+    time.sleep(8)
     shot = call("screenshot")
     shot_path = str(shot.get("path", ""))
     if shot_path and os.path.isfile(shot_path):
