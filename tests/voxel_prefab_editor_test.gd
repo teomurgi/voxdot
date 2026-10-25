@@ -248,6 +248,11 @@ func _run() -> void:
 	_check(not _ed._prefab_drag_active, "drag released")
 	_check(_ed.doc.prefab_instance(id).anchor != anchor_before, "instance moved: " + str(_ed.doc.prefab_instance(id).anchor))
 
+	print("tool change deselects prefab")
+	_ed._set_tool(VoxelModelEditor.Tool.PLACE)
+	_check(_ed.selected_prefab_id == -1, "switching away from Prefab clears the selection")
+	_ed._set_tool(VoxelModelEditor.Tool.PREFAB)
+
 	print("unpack")
 	_ed.selected_prefab_id = id
 	var cells_before: int = _ed.doc.prefab_cell_count()

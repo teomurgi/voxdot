@@ -2070,6 +2070,8 @@ func _set_tool(t: Tool) -> void:
 		_hint_label.text = TOOL_HINTS[int(t)]
 	if t != Tool.PREFAB and prefab_rig != null:
 		prefab_rig.hide_ghost()
+		if selected_prefab_id >= 0:
+			_select_prefab(-1)
 
 
 func _set_color(c: Color) -> void:

@@ -117,10 +117,11 @@ Standalone voxel model editor on **Godot 4.7.2** (system binary `/usr/bin/godot`
     placeholders. No nesting: a source containing instances is refused.
 14. **Prefab UI/tool**: `Tool.PREFAB` is appended (value 9) so shortcuts 1–9 keep their tools; the Prefab tool
     is on `0`. Drags lock to the grabbed face plane (same rule as voxel strokes), *not* a camera-facing plane,
-    or sideways drags sink the instance in Y. A `Window` added to the tree is visible by default and swallows
-    viewport input in headless tests — instantiate `VoxelPrefabCatalogDialog` hidden. Catalogue metadata is in
-    `<library>/.voxdot/catalogue.cfg`; `VoxelPrefabCatalog.user_library_override` keeps tests out of the real
-    `~/Documents/Voxdot/Prefabs`.
+    or sideways drags sink the instance in Y. Switching to any non-Prefab tool clears `selected_prefab_id` and
+    the selection outline (armed catalogue assets survive). A `Window` added to the tree is visible by default
+    and swallows viewport input in headless tests — instantiate `VoxelPrefabCatalogDialog` hidden. Catalogue
+    metadata is in `<library>/.voxdot/catalogue.cfg`; `VoxelPrefabCatalog.user_library_override` keeps tests
+    out of the real `~/Documents/Voxdot/Prefabs`.
 15. **Prefab lights & unpack**: instance lights render in a separate `PrefabLights` group owned by
     `VoxelPrefabRig`; parent lights stay in `doc.lights`. The soft budget (`prefab_light_budget`, default 64)
     only warns/asks for `allow_over_budget`; no light is dropped. Unpack writes voxels + lights atomically and
