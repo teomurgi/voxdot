@@ -271,11 +271,28 @@ func _open_path(chosen: String) -> void:
 	_doc_replaced = true
 	var err: Error = doc.load_file(p)
 	if err == OK:
-		frame_model()
+		if not doc.character_slots.is_empty():
+			# Part-only model: the grid is empty by design, slots live on the
+			# rig. Show the rig and frame it instead of the empty grid.
+			_set_tool(Tool.CHARACTER)
+			_frame_character_rig()
+		else:
+			frame_model()
 		_say("Opened " + p)
 	else:
 		_doc_replaced = false
 		_say("Open failed (%s): %s" % [error_string(err), p])
+
+
+## Frames the live character rig (~1.6m tall at origin) after opening a
+## slot-bearing model whose voxel grid is empty.
+func _frame_character_rig() -> void:
+	_yaw = deg_to_rad(218.0)
+	_pitch = deg_to_rad(-12.0)
+	_distance = 3.5
+	_focus = Vector3(0, 0.8, 0)
+	doc.set_sun({"yaw": 218.0, "pitch": -50.0, "energy": 1.2})
+	_update_camera()
 
 
 # --- World construction ---

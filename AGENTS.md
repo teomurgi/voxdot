@@ -184,3 +184,9 @@ Standalone voxel model editor on **Godot 4.7.2** (system binary `/usr/bin/godot`
     prefabs, never embedded); the rig's `slot_models` holds the loaded models. Nesting refused like prefab
     sources. The rig's export defaults are the Warrior preset; a fresh `character_get_state` reports
     preset 0, not -1.
+24. **Character part authoring & screenshots**: `save_screenshot()` hides the character rig (it is in the
+    overlay-exclusion list), so character shots must capture the viewport with only the UI layer hidden —
+    otherwise the frame is an empty grid. Slot part grids attach via equipment holders in rig/hand-local
+    space where negative offsets are meaningful (helmet horns at x=-3, hammer head at y=-4, shield at z=-3),
+    so author parts in the segment frame (helmet shares the head's 8x8x8, brim y=5) and save WITHOUT
+    min-corner-to-origin normalization — shifting the hat to origin parked its brim at neck height.
