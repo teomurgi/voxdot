@@ -285,6 +285,9 @@ func _open_path(chosen: String) -> void:
 			_set_tool(Tool.CHARACTER)
 			_frame_character_rig()
 		else:
+			if current_tool == Tool.CHARACTER:
+				# Leaving a slot-bearing model: hide the rig, back to voxels.
+				_set_tool(Tool.PLACE)
 			frame_model()
 		_say("Opened " + p)
 	else:
