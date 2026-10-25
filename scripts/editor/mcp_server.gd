@@ -242,6 +242,74 @@ func _tool_get_tool(_args: Dictionary) -> Variant:
 	return {"tool": TOOL_NAMES_LIST[int(editor.current_tool)]}
 
 
+func _anim_state_payload() -> Dictionary:
+	return {
+		"frames": editor.doc.frame_count(),
+		"current_frame": editor.doc.current_frame,
+		"frame_times": Array(editor.doc.frame_times),
+		"anim_mode": ["once", "loop", "ping-pong"][clampi(editor.doc.anim_mode, 0, 2)],
+		"playing": editor._anim_playing,
+		"dirty": editor.doc.dirty,
+	}
+
+
+func _tool_anim_get_state(_args: Dictionary) -> Variant:
+	return _anim_state_payload()
+
+
+func _tool_anim_add_frame(_args: Dictionary) -> Variant:
+	editor._anim_add_frame()
+	return _anim_state_payload()
+
+
+func _tool_anim_delete_frame(args: Dictionary) -> Variant:
+	var i: int = int(args.get("frame", editor.doc.current_frame))
+	if not editor.doc.delete_frame(i):
+		return _tool_error("cannot delete the only frame")
+	editor._refresh_animation_ui()
+	return _anim_state_payload()
+
+
+func _tool_anim_set_frame(args: Dictionary) -> Variant:
+	if not args.has("frame"):
+		return _tool_error("frame is required")
+	if editor._anim_playing:
+		return _tool_error("stop playback before switching frames")
+	if editor._stroking:
+		return _tool_error("finish the stroke before switching frames")
+	editor.doc.goto_frame(int(args["frame"]))
+	editor._refresh_animation_ui()
+	return _anim_state_payload()
+
+
+func _tool_anim_set_frame_time(args: Dictionary) -> Variant:
+	if not args.has("frame") or not args.has("secs"):
+		return _tool_error("frame and secs are required")
+	if not editor.doc.set_frame_time(int(args["frame"]), float(args["secs"])):
+		return _tool_error("frame out of range")
+	editor._refresh_animation_ui()
+	return _anim_state_payload()
+
+
+func _tool_anim_set_mode(args: Dictionary) -> Variant:
+	var modes: Dictionary = {"once": 0, "loop": 1, "ping-pong": 2}
+	var m: String = str(args.get("mode", "loop"))
+	if not modes.has(m):
+		return _tool_error("mode must be one of once, loop, ping-pong")
+	editor.doc.set_anim_mode(int(modes[m]))
+	editor._refresh_animation_ui()
+	return _anim_state_payload()
+
+
+func _tool_anim_play(_args: Dictionary) -> Variant:
+	editor._set_anim_playing(true)
+	return _anim_state_payload()
+
+
+func _tool_anim_stop(_args: Dictionary) -> Variant:
+	editor._set_anim_playing(false)
+	return _anim_state_payload()
+
 func _tool_set_color(args: Dictionary) -> Variant:
 	var c: Variant = _parse_color(args.get("color"))
 	if c == null:
@@ -1389,4 +1457,12 @@ func _define_tools() -> Array[Dictionary]:
 		{"name": "character_set_slot", "description": "Set one character part slot (helmet, chest, main_hand, off_hand): either a procedural index, or a saved-model path that overrides it. Empty path clears back to procedural. Saved-model sources containing prefab instances are refused.", "inputSchema": {"type": "object", "properties": {"slot": {"type": "string", "enum": ["helmet", "chest", "main_hand", "off_hand"]}, "index": {"type": "integer"}, "path": {"type": "string"}}, "required": ["slot"]}},
 		{"name": "character_set_anim_state", "description": "Preview a locomotion state on the live rig: idle, walk, or run.", "inputSchema": {"type": "object", "properties": {"state": {"type": "string", "enum": ["idle", "walk", "run"]}}}},
 		{"name": "character_play_attack", "description": "Play one attack swing on the live rig (upper/lower body split keeps the legs moving).", "inputSchema": {"type": "object", "properties": {}}},
+		{"name": "anim_get_state", "description": "Flipbook state: frame count, current frame, per-frame times, repeat mode, playing flag.", "inputSchema": {"type": "object", "properties": {}}},
+		{"name": "anim_add_frame", "description": "Duplicate the current frame (voxels + materials) and select the copy. Refused while playing.", "inputSchema": {"type": "object", "properties": {}}},
+		{"name": "anim_delete_frame", "description": "Delete a frame by index (default: current). Never the last frame.", "inputSchema": {"type": "object", "properties": {"frame": {"type": "integer"}}}},
+		{"name": "anim_set_frame", "description": "Switch the live editing grid to a frame by index. Clears undo/redo; refused while playing or stroking.", "inputSchema": {"type": "object", "properties": {"frame": {"type": "integer"}}, "required": ["frame"]}},
+		{"name": "anim_set_frame_time", "description": "How long a frame shows during playback (0.05-10s).", "inputSchema": {"type": "object", "properties": {"frame": {"type": "integer"}, "secs": {"type": "number"}}, "required": ["frame", "secs"]}},
+		{"name": "anim_set_mode", "description": "Repeat mode: once, loop, or ping-pong.", "inputSchema": {"type": "object", "properties": {"mode": {"type": "string", "enum": ["once", "loop", "ping-pong"]}}}},
+		{"name": "anim_play", "description": "Play the voxel frames from frame 0 (voxels change; bones don't). Refused while stroking.", "inputSchema": {"type": "object", "properties": {}}},
+		{"name": "anim_stop", "description": "Stop flipbook playback on the current frame.", "inputSchema": {"type": "object", "properties": {}}},
 	]

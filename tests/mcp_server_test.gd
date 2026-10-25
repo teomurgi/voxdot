@@ -338,6 +338,24 @@ func _run() -> void:
 	_check((await _call("character_set_slot", {"slot": "main_hand", "path": ""}))["_ok"], "character slot cleared")
 	_check(not _ed.doc.character_slots.has("main_hand"), "cleared slot leaves the document")
 
+	print("flipbook over MCP")
+	for expect: String in ["anim_get_state", "anim_add_frame", "anim_delete_frame", "anim_set_frame", "anim_set_frame_time", "anim_set_mode", "anim_play", "anim_stop"]:
+		_check(tool_names.has(expect), "advertises %s" % expect)
+	_check((await _call("anim_get_state"))["_payload"]["frames"] == 1, "static model has 1 frame")
+	_check((await _call("anim_add_frame"))["_payload"]["frames"] == 2, "anim_add_frame duplicates")
+	_check((await _call("anim_set_frame", {"frame": 1}))["_payload"]["current_frame"] == 1, "anim_set_frame switches")
+	_check((await _call("place", {"cell": [7, 0, 7], "color": "ff00ff"}))["_ok"], "paint on frame 1")
+	_check((await _call("anim_set_frame", {"frame": 0}))["_ok"], "back to frame 0")
+	_check(not _ed.doc.grid.has(Vector3i(7, 0, 7)), "frame 0 unaffected")
+	_check((await _call("anim_set_frame_time", {"frame": 1, "secs": 0.2}))["_payload"]["frame_times"][1] == 0.2, "anim_set_frame_time")
+	_check((await _call("anim_set_mode", {"mode": "ping-pong"}))["_payload"]["anim_mode"] == "ping-pong", "anim_set_mode")
+	_check((await _call("anim_play"))["_payload"]["playing"] == true, "anim_play")
+	_check((await _call("anim_set_frame", {"frame": 0}))["_ok"] == false, "frame switch refused while playing")
+	_check((await _call("anim_stop"))["_payload"]["playing"] == false, "anim_stop")
+	_check((await _call("anim_set_mode", {"mode": "sideways"}))["_ok"] == false, "bad mode rejected")
+	_check((await _call("anim_delete_frame", {"frame": 1}))["_payload"]["frames"] == 1, "anim_delete_frame")
+	_check((await _call("anim_delete_frame", {"frame": 0}))["_ok"] == false, "last frame protected")
+
 	print("screenshot")
 	var shot: Dictionary = await _call("screenshot")
 	# Headless has no real viewport texture; on a live window this returns a PNG path.

@@ -26,6 +26,18 @@ extends Resource
 ## Optional per-voxel solid/walkable overrides aligned with `cells`. Empty means
 ## every voxel inherits its material's flags. See VoxelMaterial.make_overrides().
 @export var material_overrides: PackedByteArray = PackedByteArray()
+## Flipbook animation: extra frames beyond the base `cells`. Each entry of
+## `anim_frame_cells` uses the same packed xyz+palette-index layout as `cells`
+## with its own palette in `anim_frame_palettes`; materials/overrides align
+## per frame (empty = default/inherit). Times are seconds per frame;
+## `anim_mode` is 0=once, 1=loop, 2=ping-pong. All empty/zero = static model,
+## so old files load unchanged and static models pay nothing.
+@export var anim_frame_cells: Array[PackedInt32Array] = []
+@export var anim_frame_palettes: Array[PackedColorArray] = []
+@export var anim_frame_materials: Array[PackedByteArray] = []
+@export var anim_frame_overrides: Array[PackedByteArray] = []
+@export var anim_frame_times: PackedFloat32Array = PackedFloat32Array()
+@export var anim_mode: int = 0
 ## id, x, y, z, red, green, blue, energy, range, shadows per point light.
 ## Positions and ranges are in voxel units, like the editor; runtime instances
 ## scale them by voxel_size. IDs are stable across save/open and undo/redo.
@@ -161,6 +173,105 @@ func to_override_grid() -> Dictionary:
 			out[Vector3i(cells[i * 4], cells[i * 4 + 1], cells[i * 4 + 2])] = bits
 	return out
 
+
+## Number of flipbook frames including the base `cells` (1 = static model).
+func frame_count() -> int:
+	return 1 + anim_frame_cells.size()
+
+
+## Frame `i` as { Vector3i: Color }. Frame 0 is the base grid.
+func frame_grid(i: int) -> Dictionary:
+	if i <= 0:
+		return to_grid()
+	var j: int = i - 1
+	if j >= anim_frame_cells.size() or j >= anim_frame_palettes.size():
+		return {}
+	var out: Dictionary = {}
+	var packed: PackedInt32Array = anim_frame_cells[j]
+	var pal: PackedColorArray = anim_frame_palettes[j]
+	for k in range(0, packed.size() - 3, 4):
+		var idx: int = packed[k + 3]
+		if idx < 0 or idx >= pal.size():
+			continue
+		out[Vector3i(packed[k], packed[k + 1], packed[k + 2])] = pal[idx]
+	return out
+
+
+## Frame `i` sparse material/override maps (same shape as the base getters).
+func frame_material_grid(i: int) -> Dictionary:
+	return _frame_byte_grid(i, true)
+
+
+func frame_override_grid(i: int) -> Dictionary:
+	return _frame_byte_grid(i, false)
+
+
+func _frame_byte_grid(i: int, want_material: bool) -> Dictionary:
+	var out: Dictionary = {}
+	if i <= 0:
+		return to_material_grid() if want_material else to_override_grid()
+	var j: int = i - 1
+	var arr: PackedByteArray = (anim_frame_materials[j] if want_material else anim_frame_overrides[j]) \
+		if j < (anim_frame_materials if want_material else anim_frame_overrides).size() else PackedByteArray()
+	var packed: PackedInt32Array = anim_frame_cells[j] if j < anim_frame_cells.size() else PackedInt32Array()
+	if arr.size() != packed.size() >> 2:
+		return out
+	for k in arr.size():
+		var v: int = int(arr[k])
+		var keep: bool = v != VoxelMaterial.Kind.DEFAULT if want_material else v != 0
+		if keep:
+			out[Vector3i(packed[k * 4], packed[k * 4 + 1], packed[k * 4 + 2])] = v
+	return out
+
+
+## Appends the packed encoding of `grid` as a new frame. Mirrors `set_cells`
+## (sorted keys, per-frame palette, sparse metadata) without touching the base.
+func append_frame(grid: Dictionary, material_grid: Dictionary = {}, override_grid: Dictionary = {}) -> void:
+	var keys: Array = grid.keys()
+	keys.sort_custom(_cell_less)
+	var new_palette := PackedColorArray()
+	var lookup: Dictionary = {}
+	var sparse_mats: Dictionary = {}
+	var sparse_ovs: Dictionary = {}
+	for p: Vector3i in material_grid:
+		var k: int = clampi(int(material_grid[p]), 0, VoxelMaterial.count() - 1)
+		if k != VoxelMaterial.Kind.DEFAULT:
+			sparse_mats[p] = k
+	for p: Vector3i in override_grid:
+		var b: int = int(override_grid[p]) & 0xFF
+		if b != 0:
+			sparse_ovs[p] = b
+	var any_material: bool = not sparse_mats.is_empty()
+	var any_override: bool = not sparse_ovs.is_empty()
+	var out := PackedInt32Array()
+	out.resize(keys.size() * 4)
+	var mats := PackedByteArray()
+	var ovs := PackedByteArray()
+	if any_material:
+		mats.resize(keys.size())
+	if any_override:
+		ovs.resize(keys.size())
+	var o: int = 0
+	for p: Vector3i in keys:
+		var c: Color = grid[p]
+		if not lookup.has(c):
+			lookup[c] = new_palette.size()
+			new_palette.append(c)
+		out[o] = p.x
+		out[o + 1] = p.y
+		out[o + 2] = p.z
+		out[o + 3] = lookup[c]
+		var idx: int = o >> 2
+		if any_material:
+			mats[idx] = int(sparse_mats.get(p, VoxelMaterial.Kind.DEFAULT))
+		if any_override:
+			ovs[idx] = int(sparse_ovs.get(p, 0))
+		o += 4
+	anim_frame_cells.append(out)
+	anim_frame_palettes.append(new_palette)
+	anim_frame_materials.append(mats)
+	anim_frame_overrides.append(ovs)
+	# Times stay the document's job: _persist_frames appends one per frame.
 
 ## Builds a render mesh at this model's real-world voxel size. Prefab
 ## instances are composed in; a model without instances produces exactly the

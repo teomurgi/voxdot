@@ -190,3 +190,13 @@ Standalone voxel model editor on **Godot 4.7.2** (system binary `/usr/bin/godot`
     space where negative offsets are meaningful (helmet horns at x=-3, hammer head at y=-4, shield at z=-3),
     so author parts in the segment frame (helmet shares the head's 8x8x8, brim y=5) and save WITHOUT
     min-corner-to-origin normalization — shifting the hat to origin parked its brim at neck height.
+25. **Flipbook animation**: whole-model frames (`anim_frame_cells/palettes/materials/overrides/times` +
+    `anim_mode` on `VoxelModel`; empty = static, old files unchanged). `VoxelDocument.frames` holds one dict
+    per frame with the live `grid`/`cell_materials`/`cell_overrides` aliasing `frames[current_frame]`; stroke
+    records are bare Vector3i with no frame tag, so `goto_frame()` clears undo/redo (same as load/new-doc
+    reset). Base cells are always frame 0 at save (`to_model` packs `frames[0]` as base, no matter what is
+    live). `VoxelModel.append_frame()` packs cells/palette/metadata but NOT times (document appends those —
+    double-append shifted every frame time by one). Playback swaps live refs via `goto_frame`, so an
+    `_anim_playing` guard in `_begin_stroke` (and refusal in `anim_set_frame`/`anim_play` while stroking)
+    keeps strokes out of the wrong frame. Section header buttons are found by ▼/▶ prefix — nav button labels
+    must not start with those glyphs.

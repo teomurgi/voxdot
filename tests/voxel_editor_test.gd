@@ -192,7 +192,7 @@ func _test_panel_layout() -> void:
 		return
 	var left_names: Array[String] = _header_names(left)
 	var right_names: Array[String] = _header_names(right)
-	_check(left_names == ["File", "Model", "Tool", "Color", "Material", "View", "Help"],
+	_check(left_names == ["File", "Model", "Tool", "Color", "Material", "Animation", "View", "Help"],
 			"left panel sections: " + str(left_names))
 	_check(right_names == ["Sun (directional)", "Atmosphere", "Lighting — point lights", "Prefabs", "Character"],
 			"right panel sections: " + str(right_names))

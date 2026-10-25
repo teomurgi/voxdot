@@ -145,6 +145,14 @@ var _material_buttons: Array[Button] = []
 var _material_info_label: Label
 var _solid_override_option: OptionButton
 var _walkable_override_option: OptionButton
+
+# --- Flipbook animation transport ---
+var _anim_playing: bool = false
+var _anim_time: float = 0.0
+var _anim_frame_label: Label
+var _anim_time_spin: SpinBox
+var _anim_mode_option: OptionButton
+var _anim_play_button: Button
 var _mirror_x_check: CheckButton
 var _mirror_z_check: CheckButton
 var _depth_spin: SpinBox
@@ -645,6 +653,9 @@ func _on_doc_reset() -> void:
 	selected_prefab_id = -1
 	_drag_prefab_id = -1
 	_prefab_drag_active = false
+	_anim_playing = false
+	_anim_bounce_back = false
+	_anim_time = 0.0
 	# An armed catalogue asset survives open/new: the user may be building a
 	# scene from several models. Its source is independent of the document.
 	_sync_light_nodes()
@@ -654,6 +665,7 @@ func _on_doc_reset() -> void:
 	_rebuild_chunks_from_grid()
 	_mesh_dirty = true
 	_refresh_prefab_ui()
+	_refresh_animation_ui()
 
 
 ## Applies the sun saved in the document to the scene. Called on load/reset so
@@ -835,7 +847,7 @@ func _process(delta: float) -> void:
 		_update_dirty_chunks()
 	_update_camera()
 	_update_horizon_chunks()
-	light_rig.update_handle_scales(camera)
+	_tick_animation(delta)
 	var mouse: Vector2 = get_viewport().get_mouse_position()
 	var origin: Vector3 = camera.project_ray_origin(mouse)
 	var dir: Vector3 = camera.project_ray_normal(mouse)
@@ -943,6 +955,9 @@ static func _axis_of(n: Vector3i) -> int:
 # --- Stroke handling ---
 
 func _begin_stroke(h: Dictionary) -> void:
+	if _anim_playing:
+		_say("Stop playback (Animation section) before painting")
+		return
 	var cell: Vector3i = h["cell"]
 	if current_tool == Tool.PREFAB:
 		_begin_prefab_action(h)
@@ -1487,6 +1502,163 @@ func _sync_material_ui() -> void:
 		VoxelMaterial.solid_override(current_material_overrides)))
 	_walkable_override_option.select(_walkable_override_option.get_item_index(
 		VoxelMaterial.walkable_override(current_material_overrides)))
+	_syncing_ui = false
+
+
+func _build_animation_ui(parent: VBoxContainer) -> void:
+	var body := _section(parent, "Animation")
+	var nav := HBoxContainer.new()
+	nav.add_theme_constant_override("separation", 4)
+	body.add_child(nav)
+	for entry: Array in [["|◀", -100], ["<", -1], [">", 1], [">|", 100]]:
+		var label_text: String = entry[0]
+		var step: int = entry[1]
+		var b := _button(label_text, func() -> void: _anim_step(step))
+		b.tooltip_text = "Go to first/prev/next/last frame"
+		b.custom_minimum_size = Vector2(40, 0)
+		nav.add_child(b)
+	_anim_frame_label = _label("Frame 1/1")
+	_anim_frame_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_anim_frame_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	nav.add_child(_anim_frame_label)
+	var edit_row := HBoxContainer.new()
+	edit_row.add_theme_constant_override("separation", 4)
+	body.add_child(edit_row)
+	var add_b := _button("+ Frame", _anim_add_frame)
+	add_b.tooltip_text = "Duplicate the current frame (paint it into the next pose)"
+	add_b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	edit_row.add_child(add_b)
+	var del_b := _button("Delete", _anim_delete_frame)
+	del_b.tooltip_text = "Delete the current frame (never the last one)"
+	del_b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	edit_row.add_child(del_b)
+	var time_row := HBoxContainer.new()
+	body.add_child(time_row)
+	time_row.add_child(_label("Secs"))
+	_anim_time_spin = _spin(0.05, 10.0, 0.05, 0.5)
+	_anim_time_spin.tooltip_text = "How long the current frame shows during playback"
+	_anim_time_spin.value_changed.connect(func(v: float) -> void:
+		if not _syncing_ui:
+			doc.set_frame_time(doc.current_frame, v)
+			_refresh_animation_ui())
+	time_row.add_child(_anim_time_spin)
+	var mode_row := HBoxContainer.new()
+	body.add_child(mode_row)
+	mode_row.add_child(_label("Repeat"))
+	_anim_mode_option = OptionButton.new()
+	_anim_mode_option.focus_mode = Control.FOCUS_NONE
+	_anim_mode_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_anim_mode_option.add_item("Once", 0)
+	_anim_mode_option.add_item("Loop", 1)
+	_anim_mode_option.add_item("Ping-pong", 2)
+	_anim_mode_option.item_selected.connect(_on_anim_mode_selected)
+	mode_row.add_child(_anim_mode_option)
+	_anim_play_button = _button("Play frames", _toggle_anim_playback)
+	_anim_play_button.tooltip_text = "Play the voxel frames (voxels change; bones don't)"
+	body.add_child(_anim_play_button)
+	_refresh_animation_ui()
+
+
+func _anim_step(step: int) -> void:
+	if _anim_playing:
+		_set_anim_playing(false)
+	if step <= -100:
+		doc.goto_frame(0)
+	elif step >= 100:
+		doc.goto_frame(doc.frame_count() - 1)
+	else:
+		doc.goto_frame(doc.current_frame + step)
+	_refresh_animation_ui()
+
+
+func _anim_add_frame() -> void:
+	if _anim_playing:
+		_set_anim_playing(false)
+	var i: int = doc.add_frame_from_current()
+	_say("Frame %d added (duplicate of %d)" % [i + 1, i])
+	_refresh_animation_ui()
+
+
+func _anim_delete_frame() -> void:
+	if _anim_playing:
+		_set_anim_playing(false)
+	if doc.delete_frame(doc.current_frame):
+		_say("Frame deleted")
+	else:
+		_say("Cannot delete the only frame")
+	_refresh_animation_ui()
+
+
+func _on_anim_mode_selected(index: int) -> void:
+	doc.set_anim_mode(int(_anim_mode_option.get_item_id(index)))
+	_refresh_animation_ui()
+
+
+func _toggle_anim_playback() -> void:
+	_set_anim_playing(not _anim_playing)
+
+
+func _set_anim_playing(on: bool) -> void:
+	if on and _stroking:
+		_say("Finish the stroke before playing")
+		return
+	_anim_playing = on
+	_anim_time = 0.0
+	if on and doc.frame_count() > 1:
+		doc.goto_frame(0)
+	_refresh_animation_ui()
+
+
+## Advances playback: holds each frame for its time, then steps per mode
+## (once stops at the end, loop wraps, ping-pong bounces). Called from
+## `_process`; refuses to run while a stroke is active.
+func _tick_animation(delta: float) -> void:
+	if not _anim_playing or _stroking:
+		return
+	if doc.frame_count() <= 1:
+		_set_anim_playing(false)
+		return
+	_anim_time += delta
+	var cur: int = doc.current_frame
+	var hold: float = float(doc.frame_times[cur]) if cur < doc.frame_times.size() else 0.5
+	if _anim_time < hold:
+		return
+	_anim_time = 0.0
+	var last: int = doc.frame_count() - 1
+	var nxt: int = cur + 1
+	if doc.anim_mode == 2 and _anim_bounce_back:
+		nxt = cur - 1
+	if nxt > last:
+		if doc.anim_mode == 0:
+			_set_anim_playing(false)
+			return
+		elif doc.anim_mode == 1:
+			nxt = 0
+		else:
+			_anim_bounce_back = true
+			nxt = maxi(cur - 1, 0)
+	elif nxt < 0:
+		_anim_bounce_back = false
+		nxt = mini(cur + 1, last)
+	elif doc.anim_mode == 2 and nxt == last:
+		_anim_bounce_back = true
+	doc.goto_frame(nxt)
+	_refresh_animation_ui()
+
+
+var _anim_bounce_back: bool = false
+
+
+func _refresh_animation_ui() -> void:
+	if _anim_frame_label == null:
+		return
+	_syncing_ui = true
+	var n: int = doc.frame_count()
+	_anim_frame_label.text = "Frame %d/%d%s" % [doc.current_frame + 1, n, " · ▶" if _anim_playing else ""]
+	if doc.current_frame < doc.frame_times.size():
+		_anim_time_spin.value = doc.frame_times[doc.current_frame]
+	_anim_mode_option.select(_anim_mode_option.get_item_index(doc.anim_mode))
+	_anim_play_button.text = "Stop" if _anim_playing else "Play frames"
 	_syncing_ui = false
 
 
@@ -2735,6 +2907,7 @@ func _build_ui() -> void:
 	color_body.add_child(add_swatch)
 
 	_build_material_ui(vb)
+	_build_animation_ui(vb)
 
 	var view_body := _section(vb, "View")
 	var view_row := HBoxContainer.new()
@@ -3032,6 +3205,8 @@ func _update_status() -> void:
 		name_text, "*" if doc.dirty else "", doc.voxel_count(), doc.prefab_cell_count(),
 		doc.bounds.x, doc.bounds.y, doc.bounds.z, doc.prefab_instances.size(),
 		doc.lights.size() + doc.prefab_light_count()]
+	if doc.frame_count() > 1 or _anim_playing:
+		line += "  |  Frame %d/%d%s" % [doc.current_frame + 1, doc.frame_count(), " ▶" if _anim_playing else ""]
 	if problems > 0:
 		line += "\n%d missing, %d conflicted, %d incompatible" % [
 			int(counts.get("missing", 0)), int(counts.get("conflict", 0)),

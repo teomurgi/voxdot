@@ -87,9 +87,15 @@ var dirty: bool = false
 var prefab_instances: Array[VoxelPrefabInstance] = []
 var prefab_light_budget: int = 64
 var prefab_composition: VoxelPrefabComposition = VoxelPrefabComposition.new()
-## Character part slot overrides (slot name -> saved-model path), saved in the
-## model but not undoable (like mirror flags and scene mood).
 var character_slots: Dictionary = {}
+## Flipbook frames. `frames[i]` holds grid/materials/overrides dicts; the live
+## `grid`/`cell_materials`/`cell_overrides` always alias `frames[current_frame]`
+## (frame 0 is the base cells). Frame add/delete/switch are meta ops (saved,
+## not undoable); painting a frame is a normal stroke on the live dicts.
+var frames: Array[Dictionary] = []
+var frame_times: Array[float] = []
+var anim_mode: int = 0  # 0=once, 1=loop, 2=ping-pong
+var current_frame: int = 0
 
 var _undo_stack: Array[Dictionary] = []
 var _redo_stack: Array[Dictionary] = []
@@ -679,6 +685,92 @@ func set_character_slot(slot: String, model_path: String) -> bool:
 	return true
 
 
+# --- Flipbook frames ---
+## Frame count including the base frame (1 = static model).
+func frame_count() -> int:
+	return maxi(frames.size(), 1)
+
+
+## Binds the live editing dicts to `frames[i]` (alias, not copy). Clears
+## undo/redo: stroke records are bare Vector3i entries with no frame tag, so
+## applying them after a switch would corrupt the new frame.
+func goto_frame(i: int) -> bool:
+	if frames.is_empty():
+		_ensure_frame_store()
+	var n: int = clampi(i, 0, frames.size() - 1)
+	if n == current_frame:
+		return false
+	current_frame = n
+	grid = frames[n]["grid"]
+	cell_materials = frames[n]["materials"]
+	cell_overrides = frames[n]["overrides"]
+	_undo_stack.clear()
+	_redo_stack.clear()
+	_stroke = {}
+	_material_stroke = {}
+	changed.emit()
+	history_changed.emit()
+	return true
+
+
+## Duplicates the live frame (grid + metadata) and selects the copy.
+func add_frame_from_current() -> int:
+	_ensure_frame_store()
+	frames.append({
+		"grid": (grid as Dictionary).duplicate(),
+		"materials": (cell_materials as Dictionary).duplicate(),
+		"overrides": (cell_overrides as Dictionary).duplicate(),
+	})
+	frame_times.append(0.5)
+	dirty = true
+	goto_frame(frames.size() - 1)
+	meta_changed.emit()
+	return frames.size() - 1
+
+
+## Deletes frame `i` (never the last remaining frame). Selects a neighbour.
+func delete_frame(i: int) -> bool:
+	if frames.size() <= 1:
+		return false
+	var n: int = clampi(i, 0, frames.size() - 1)
+	frames.remove_at(n)
+	frame_times.remove_at(n)
+	dirty = true
+	goto_frame(mini(current_frame, frames.size() - 1))
+	meta_changed.emit()
+	return true
+
+
+func set_frame_time(i: int, secs: float) -> bool:
+	if i < 0 or i >= frame_times.size():
+		return false
+	var t: float = clampf(secs, 0.05, 10.0)
+	if is_equal_approx(t, frame_times[i]):
+		return false
+	frame_times[i] = t
+	dirty = true
+	meta_changed.emit()
+	return true
+
+
+func set_anim_mode(m: int) -> bool:
+	var mode: int = clampi(m, 0, 2)
+	if mode == anim_mode:
+		return false
+	anim_mode = mode
+	dirty = true
+	meta_changed.emit()
+	return true
+
+
+## Ensures the single-frame store exists and the live dicts alias frame 0.
+func _ensure_frame_store() -> void:
+	if frames.is_empty():
+		frames = [{"grid": grid, "materials": cell_materials, "overrides": cell_overrides}]
+		frame_times = [0.5]
+		current_frame = 0
+
+
 func prefab_instance(id: int) -> VoxelPrefabInstance:
 	for inst: VoxelPrefabInstance in prefab_instances:
 		if inst != null and inst.instance_id == id:
@@ -1176,9 +1268,13 @@ static func _uid_text_for(res: Resource) -> String:
 # --- Lifecycle / IO ---
 
 func reset() -> void:
-	grid = {}
-	cell_materials = {}
-	cell_overrides = {}
+	frames = [{"grid": {}, "materials": {}, "overrides": {}}]
+	frame_times = [0.5]
+	anim_mode = 0
+	current_frame = 0
+	grid = frames[0]["grid"]
+	cell_materials = frames[0]["materials"]
+	cell_overrides = frames[0]["overrides"]
 	lights = {}
 	bounds = Vector3i(32, 32, 32)
 	voxel_size = 0.0625
@@ -1236,8 +1332,27 @@ func to_model() -> VoxelModel:
 			saved.append(inst.copy_for_save())
 	m.prefab_instances = saved
 	m.character_slots = character_slots.duplicate()
-	m.set_cells(grid, cell_materials, cell_overrides)
+	# Base cells are always frame 0, even when another frame is live.
+	var base: Dictionary = frames[0]["grid"] if not frames.is_empty() else grid
+	var base_mats: Dictionary = frames[0]["materials"] if not frames.is_empty() else cell_materials
+	var base_ovs: Dictionary = frames[0]["overrides"] if not frames.is_empty() else cell_overrides
+	m.set_cells(base, base_mats, base_ovs)
+	_persist_frames(m)
 	return m
+
+
+## Packs every extra frame (1..n) into the model via append_frame; frame 0 is
+## the base cells. Single-frame documents write nothing extra.
+func _persist_frames(m: VoxelModel) -> void:
+	m.anim_frame_cells.clear()
+	m.anim_frame_palettes.clear()
+	m.anim_frame_materials.clear()
+	m.anim_frame_overrides.clear()
+	m.anim_frame_times = PackedFloat32Array()
+	m.anim_mode = anim_mode
+	for i in range(1, frames.size()):
+		m.append_frame(frames[i]["grid"], frames[i]["materials"], frames[i]["overrides"])
+		m.anim_frame_times.append(float(frame_times[i]) if i < frame_times.size() else 0.5)
 
 
 ## Loads `m` into this document. Bounds grow (up to MAX_BOUND) to fit its
@@ -1274,23 +1389,48 @@ func load_model(m: VoxelModel, source_path: String = "") -> int:
 		else:
 			dropped_lights += 1
 	_recompute_next_light_id()
-	grid = {}
+	# Rebuild the frame store: base grid first, then extra frames from the
+	# model. Live dicts alias frame 0.
+	frames.clear()
+	frame_times.clear()
+	frames.append({"grid": {}, "materials": {}, "overrides": {}})
+	frame_times.append(0.5)
+	grid = frames[0]["grid"]
+	cell_materials = frames[0]["materials"]
+	cell_overrides = frames[0]["overrides"]
 	var dropped: int = 0
 	for p: Vector3i in src:
 		if in_bounds(p):
 			grid[p] = src[p]
 		else:
 			dropped += 1
-	cell_materials = {}
 	var loaded_materials: Dictionary = m.to_material_grid()
 	for p: Vector3i in loaded_materials:
 		if grid.has(p):
 			cell_materials[p] = int(loaded_materials[p])
-	cell_overrides = {}
 	var loaded_overrides: Dictionary = m.to_override_grid()
 	for p: Vector3i in loaded_overrides:
 		if grid.has(p):
 			cell_overrides[p] = int(loaded_overrides[p])
+	for i in range(1, m.frame_count()):
+		var kept: Dictionary = {}
+		for p: Vector3i in m.frame_grid(i):
+			if in_bounds(p):
+				kept[p] = m.frame_grid(i)[p]
+		var fmg: Dictionary = m.frame_material_grid(i)
+		var fm: Dictionary = {}
+		for p: Vector3i in fmg:
+			if kept.has(p):
+				fm[p] = int(fmg[p])
+		var fog: Dictionary = m.frame_override_grid(i)
+		var fo: Dictionary = {}
+		for p: Vector3i in fog:
+			if kept.has(p):
+				fo[p] = int(fog[p])
+		frames.append({"grid": kept, "materials": fm, "overrides": fo})
+		frame_times.append(float(m.anim_frame_times[i - 1]) if i - 1 < m.anim_frame_times.size() else 0.5)
+	anim_mode = clampi(m.anim_mode, 0, 2)
+	current_frame = 0
 	voxel_size = m.voxel_size
 	swatches = m.swatches if not m.swatches.is_empty() else default_swatches()
 	sun_energy = clampf(m.sun_energy, 0.0, MAX_SUN_ENERGY)
