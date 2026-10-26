@@ -24,6 +24,7 @@ func _initialize() -> void:
 	_test_atmosphere()
 	_test_materials()
 	_test_raycast()
+	_test_animation_frames()
 	_test_prefabs()
 	print("voxel_document_test: ", "PASS" if _fails == 0 else "%d FAILED" % _fails)
 	quit(1 if _fails > 0 else 0)
@@ -383,6 +384,72 @@ func _test_raycast() -> void:
 	_check(r["floor"] or r["hit"], "diagonal ray from outside reaches floor or voxel")
 	r = VoxelRaycast.cast(grid, b, Vector3(3.5, 0.5, 3.5), Vector3.UP)
 	_check(r["hit"] and r["pos"] == Vector3i(3, 0, 3), "origin inside a voxel hits it")
+
+
+## Flipbook regressions from the 2026-10-26 review: delete-frame rebinding,
+## frame-dependent bounds validation, per-frame timing round-trips, and
+## single-decode extra-frame loading.
+func _test_animation_frames() -> void:
+	print("animation frames")
+	# Delete the middle frame: the live dicts must rebind to the survivor at
+	# the same index, clear history, and keep later edits on the saved frame.
+	var d := VoxelDocument.new()
+	d.place_cells([Vector3i(1, 0, 1)] as Array[Vector3i], Color.RED)
+	d.add_frame_from_current()
+	d.paint_cells([Vector3i(1, 0, 1)] as Array[Vector3i], Color.BLUE)
+	d.add_frame_from_current()
+	d.paint_cells([Vector3i(1, 0, 1)] as Array[Vector3i], Color.GREEN)
+	_check(d.frame_count() == 3, "three frames")
+	d.goto_frame(1)
+	_check(d.delete_frame(1) and d.frame_count() == 2, "delete the middle frame")
+	_check(d.grid.get(Vector3i(1, 0, 1)) == Color.GREEN, "live grid rebinds to the survivor")
+	_check(not d.can_undo() and not d.can_redo(), "delete clears history even at the same index")
+	d.paint_cells([Vector3i(1, 0, 1)] as Array[Vector3i], Color.YELLOW)
+	var m := d.to_model()
+	_check(m.frame_grid(1).get(Vector3i(1, 0, 1)) == Color.YELLOW, "edits after delete persist")
+	# Deleting the current frame (same index) switches live binding too.
+	var d2 := VoxelDocument.new()
+	d2.place_cells([Vector3i(0, 0, 0)] as Array[Vector3i], Color.RED)
+	d2.add_frame_from_current()
+	d2.paint_cells([Vector3i(0, 0, 0)] as Array[Vector3i], Color.BLUE)
+	d2.goto_frame(0)
+	_check(d2.delete_frame(0), "delete frame 0")
+	_check(d2.current_frame == 0 and d2.grid.get(Vector3i(0, 0, 0)) == Color.BLUE,
+		"live grid follows the survivor at index 0")
+	# Bounds apply to every frame: a shrink that only clears the live frame
+	# is refused, fit-to-content spans all frames, and loads grow to fit them.
+	var d3 := VoxelDocument.new()
+	d3.place_cells([Vector3i(0, 0, 0)] as Array[Vector3i], Color.RED)
+	d3.add_frame_from_current()
+	d3.place_cells([Vector3i(10, 0, 0)] as Array[Vector3i], Color.BLUE)
+	d3.goto_frame(0)
+	_check(not d3.resize_bounds(Vector3i(4, 4, 4)), "shrink refused by another frame's voxel")
+	_check(d3.content_extent() == Vector3i(11, 4, 4), "extent spans all frames")
+	d3.resize_bounds(Vector3i(64, 32, 32))
+	var grown := VoxelDocument.new()
+	grown.load_model(d3.to_model())
+	_check(grown.bounds.x >= 11 and grown.to_model().frame_grid(1).has(Vector3i(10, 0, 0)),
+		"extra-frame voxels survive the round-trip")
+	# Timing round-trips every frame, including frame 0. Legacy files with
+	# only extra-frame times still load with the old frame-0 default.
+	var d4 := VoxelDocument.new()
+	d4.place_cells([Vector3i(0, 0, 0)] as Array[Vector3i], Color.RED)
+	d4.add_frame_from_current()
+	_check(d4.set_frame_time(0, 2.0) and d4.set_frame_time(1, 0.2), "distinct frame times")
+	var rt := VoxelDocument.new()
+	rt.load_model(d4.to_model())
+	_check(is_equal_approx(rt.frame_times[0], 2.0) and is_equal_approx(rt.frame_times[1], 0.2),
+		"frame times round-trip: " + str(rt.frame_times))
+	var legacy := VoxelModel.from_grid({Vector3i(0, 0, 0): Color.RED})
+	legacy.append_frame({Vector3i(1, 0, 0): Color.BLUE})
+	legacy.anim_frame_times = PackedFloat32Array([0.7])
+	var leg_doc := VoxelDocument.new()
+	leg_doc.load_model(legacy)
+	_check(is_equal_approx(leg_doc.frame_times[0], 0.5) and is_equal_approx(leg_doc.frame_times[1], 0.7),
+		"legacy extra-only times load: " + str(leg_doc.frame_times))
+	# A smaller frame's resize refusal and the frame switch helper behave.
+	_check(d4.goto_frame(0) and d4.current_frame == 0, "goto frame 0")
+	_check(not d4.goto_frame(0), "goto the current frame is a no-op")
 
 
 ## Prefab data layer: placement/transform/undo/IO, conflicts, missing sources,

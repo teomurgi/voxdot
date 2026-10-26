@@ -37,6 +37,7 @@ func _run() -> void:
 	_test_render_horizon()
 	_test_panel_layout()
 	_test_fit_bounds()
+	_test_animation_frames()
 	_test_sun_shadows()
 	_test_atmosphere()
 	_test_materials_editor()
@@ -239,6 +240,26 @@ func _test_fit_bounds() -> void:
 	_ed._fit_bounds_to_content()
 	_check(_ed.doc.bounds == Vector3i(11, 4, 11), "fit button resizes to content: " + str(_ed.doc.bounds))
 	_check(int(_ed._bound_spins[0].value) == 11, "bounds spin boxes follow a fit")
+
+
+func _test_animation_frames() -> void:
+	print("animation frame switch rebuilds chunks")
+	_ed.doc.reset()
+	_ed.doc.place_cells([Vector3i(2, 0, 2)] as Array[Vector3i], Color.RED)
+	_ed.doc.add_frame_from_current()
+	_ed.doc.paint_cells([Vector3i(2, 0, 2)] as Array[Vector3i], Color.BLUE)
+	_ed.doc.place_cells([Vector3i(20, 0, 20)] as Array[Vector3i], Color.GREEN)
+	_ed._on_frame_switched()
+	var key := Vector2i(20 / VoxelModelEditor.CHUNK_SIZE, 20 / VoxelModelEditor.CHUNK_SIZE)
+	_check(_ed._chunk_cells.has(key) and (_ed._chunk_cells[key] as Array).has(Vector3i(20, 0, 20)),
+		"chunk index follows the new frame")
+	_check(not _ed._anim_playing, "frame switch does not start playback")
+	_ed._set_anim_playing(true)
+	_ed._on_frame_switched()
+	_check(_ed._anim_playing, "renderer rebuild preserves playback")
+	_ed._set_anim_playing(false)
+	_ed.doc.reset()
+	_ed._on_frame_switched()
 
 
 func _test_sun_shadows() -> void:

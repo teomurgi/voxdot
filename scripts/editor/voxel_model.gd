@@ -29,7 +29,9 @@ extends Resource
 ## Flipbook animation: extra frames beyond the base `cells`. Each entry of
 ## `anim_frame_cells` uses the same packed xyz+palette-index layout as `cells`
 ## with its own palette in `anim_frame_palettes`; materials/overrides align
-## per frame (empty = default/inherit). Times are seconds per frame;
+## per frame (empty = default/inherit). `anim_frame_times` holds one duration
+## per frame, index-aligned (frame 0 first); older files stored only the extra
+## frames, which the editor still accepts (see VoxelDocument.load_model).
 ## `anim_mode` is 0=once, 1=loop, 2=ping-pong. All empty/zero = static model,
 ## so old files load unchanged and static models pay nothing.
 @export var anim_frame_cells: Array[PackedInt32Array] = []

@@ -200,3 +200,12 @@ Standalone voxel model editor on **Godot 4.7.2** (system binary `/usr/bin/godot`
     `_anim_playing` guard in `_begin_stroke` (and refusal in `anim_set_frame`/`anim_play` while stroking)
     keeps strokes out of the wrong frame. Section header buttons are found by ▼/▶ prefix — nav button labels
     must not start with those glyphs.
+26. **Animation review regressions (fixed 2026-10-26)**: `delete_frame()`/`add_frame_from_current()`
+    now rebind through `_bind_frame()`, which clears history and emits `frame_changed` even when the
+    numeric index is unchanged (the old `goto_frame()` early-out left the live dicts on the removed
+    frame). The editor connects `frame_changed` to `_on_frame_switched()`, which rebuilds the chunk
+    index + meshes without touching playback state (`_on_doc_reset()` still stops playback).
+    `resize_bounds()`/`content_extent()` validate all frames, `load_model()` grows bounds from every
+    frame and counts dropped extra-frame cells, and `anim_frame_times` is index-aligned (frame 0 first)
+    with `_load_frame_time()` accepting the legacy extra-only layout. Decode each frame once per load:
+    `frame_grid()`/`frame_material_grid()`/`frame_override_grid()` rebuild the dictionary per call.

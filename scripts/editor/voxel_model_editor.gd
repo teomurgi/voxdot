@@ -222,6 +222,7 @@ func _ready() -> void:
 	doc.meta_changed.connect(_on_meta_changed)
 	doc.history_changed.connect(_refresh_history_buttons)
 	doc.prefabs_changed.connect(_on_prefabs_changed)
+	doc.frame_changed.connect(_on_frame_switched)
 	_on_meta_changed()
 	_refresh_history_buttons()
 	_set_tool(Tool.PLACE)
@@ -668,6 +669,17 @@ func _on_doc_reset() -> void:
 	_rebuild_chunks_from_grid()
 	_mesh_dirty = true
 	_refresh_prefab_ui()
+	_refresh_animation_ui()
+
+
+## Rebuilds the chunk index and meshes for the newly bound frame without
+## touching playback state. Incremental `changed` handling only dirties chunks
+## for reported cells, so a frame switch (which replaces the whole grid)
+## needs a full rebuild, like a document reset.
+func _on_frame_switched() -> void:
+	_clear_chunks()
+	_rebuild_chunks_from_grid()
+	_mesh_dirty = true
 	_refresh_animation_ui()
 
 

@@ -13,6 +13,10 @@ signal meta_changed
 ## Emitted when linked prefab instances are added, removed, moved, relinked,
 ## refreshed or unpacked. `changed` also fires so the renderer can rebuild.
 signal prefabs_changed
+## Emitted when the live frame binding changes (goto/add/delete). `changed`
+## also fires; the renderer rebuilds its chunk index, which incremental
+## `changed` handling alone cannot do.
+signal frame_changed
 
 ## Last cells written by an edit (cell -> true). Lets the renderer mark just
 ## the affected chunks dirty instead of scanning the whole grid.
@@ -446,14 +450,22 @@ func flood_cells(start: Vector3i) -> Array[Vector3i]:
 
 
 ## Changes the editable volume. Refuses if voxels or lights would fall outside.
+## Bounds apply to every flipbook frame, so all frames are validated, not
+## just the live one.
 func resize_bounds(new_bounds: Vector3i) -> bool:
 	var nb := Vector3i(
 		clampi(new_bounds.x, MIN_BOUND, MAX_BOUND),
 		clampi(new_bounds.y, MIN_BOUND, MAX_BOUND),
 		clampi(new_bounds.z, MIN_BOUND, MAX_BOUND))
-	for p: Vector3i in grid:
-		if p.x >= nb.x or p.y >= nb.y or p.z >= nb.z:
-			return false
+	if frames.is_empty():
+		for p: Vector3i in grid:
+			if p.x >= nb.x or p.y >= nb.y or p.z >= nb.z:
+				return false
+	else:
+		for f: Dictionary in frames:
+			for p: Vector3i in (f["grid"] as Dictionary):
+				if p.x >= nb.x or p.y >= nb.y or p.z >= nb.z:
+					return false
 	for id: int in lights:
 		var p: Vector3 = lights[id]["position"]
 		if p.x >= nb.x or p.y >= nb.y or p.z >= nb.z:
@@ -472,16 +484,25 @@ func resize_bounds(new_bounds: Vector3i) -> bool:
 
 
 ## Smallest bounds with the origin fixed at 0 that contain every solid piece of
-## content: local voxels, valid linked prefab cells and point lights. Returns
-## Vector3i.ZERO when the document has no content. Missing/conflicted prefab
-## placeholders are not solid and do not contribute, matching resize_bounds().
+## content: local voxels in every flipbook frame, valid linked prefab cells
+## and point lights. Returns Vector3i.ZERO when the document has no content.
+## Missing/conflicted prefab placeholders are not solid and do not contribute,
+## matching resize_bounds().
 func content_extent() -> Vector3i:
 	var extent := Vector3i.ZERO
-	for p: Vector3i in grid:
-		extent = Vector3i(
-			maxi(extent.x, p.x + 1),
-			maxi(extent.y, p.y + 1),
-			maxi(extent.z, p.z + 1))
+	if frames.is_empty():
+		for p: Vector3i in grid:
+			extent = Vector3i(
+				maxi(extent.x, p.x + 1),
+				maxi(extent.y, p.y + 1),
+				maxi(extent.z, p.z + 1))
+	else:
+		for f: Dictionary in frames:
+			for p: Vector3i in (f["grid"] as Dictionary):
+				extent = Vector3i(
+					maxi(extent.x, p.x + 1),
+					maxi(extent.y, p.y + 1),
+					maxi(extent.z, p.z + 1))
 	for inst: VoxelPrefabInstance in prefab_instances:
 		if str(prefab_composition.status_for(inst.instance_id).get("state", "ok")) != "ok":
 			continue
@@ -700,6 +721,14 @@ func goto_frame(i: int) -> bool:
 	var n: int = clampi(i, 0, frames.size() - 1)
 	if n == current_frame:
 		return false
+	_bind_frame(n)
+	return true
+
+## Rebinds the live dicts to `frames[n]` unconditionally, clearing history
+## and notifying the renderer. Structural changes (add/delete) use this
+## directly: `goto_frame()` early-outs when the numeric index is unchanged,
+## which would leave the live dicts bound to the removed frame.
+func _bind_frame(n: int) -> void:
 	current_frame = n
 	grid = frames[n]["grid"]
 	cell_materials = frames[n]["materials"]
@@ -710,7 +739,7 @@ func goto_frame(i: int) -> bool:
 	_material_stroke = {}
 	changed.emit()
 	history_changed.emit()
-	return true
+	frame_changed.emit()
 
 
 ## Duplicates the live frame (grid + metadata) and selects the copy.
@@ -723,7 +752,7 @@ func add_frame_from_current() -> int:
 	})
 	frame_times.append(0.5)
 	dirty = true
-	goto_frame(frames.size() - 1)
+	_bind_frame(frames.size() - 1)
 	meta_changed.emit()
 	return frames.size() - 1
 
@@ -736,7 +765,7 @@ func delete_frame(i: int) -> bool:
 	frames.remove_at(n)
 	frame_times.remove_at(n)
 	dirty = true
-	goto_frame(mini(current_frame, frames.size() - 1))
+	_bind_frame(mini(current_frame, frames.size() - 1))
 	meta_changed.emit()
 	return true
 
@@ -1342,7 +1371,10 @@ func to_model() -> VoxelModel:
 
 
 ## Packs every extra frame (1..n) into the model via append_frame; frame 0 is
-## the base cells. Single-frame documents write nothing extra.
+## the base cells. `anim_frame_times` covers every frame (index-aligned, so
+## frame 0's duration survives), unlike the old layout that only stored the
+## extra frames. A single static frame with the default duration writes
+## nothing extra, so untouched models save exactly as before.
 func _persist_frames(m: VoxelModel) -> void:
 	m.anim_frame_cells.clear()
 	m.anim_frame_palettes.clear()
@@ -1350,25 +1382,48 @@ func _persist_frames(m: VoxelModel) -> void:
 	m.anim_frame_overrides.clear()
 	m.anim_frame_times = PackedFloat32Array()
 	m.anim_mode = anim_mode
-	for i in range(1, frames.size()):
-		m.append_frame(frames[i]["grid"], frames[i]["materials"], frames[i]["overrides"])
+	if frames.size() <= 1 and (frame_times.is_empty() or is_equal_approx(float(frame_times[0]), 0.5)):
+		return
+	for i in frames.size():
+		if i > 0:
+			m.append_frame(frames[i]["grid"], frames[i]["materials"], frames[i]["overrides"])
 		m.anim_frame_times.append(float(frame_times[i]) if i < frame_times.size() else 0.5)
+
+## Frame `i` duration from the model. Current saves store one duration per
+## frame (index-aligned); older files stored only the extra frames, so a
+## shorter times array keeps the legacy frame-0 default of 0.5 s.
+func _load_frame_time(m: VoxelModel, i: int) -> float:
+	var n: int = m.anim_frame_times.size()
+	var want: int = i if n >= m.frame_count() else i - 1
+	var t: float = float(m.anim_frame_times[want]) if want >= 0 and want < n else 0.5
+	return clampf(t, 0.05, 10.0)
 
 
 ## Loads `m` into this document. Bounds grow (up to MAX_BOUND) to fit its
-## voxels. Returns how many voxels were dropped for lying outside the
-## editable range (negative coordinates or beyond MAX_BOUND, 1024).
+## voxels in every frame. Returns how many voxels were dropped for lying
+## outside the editable range (negative coordinates or beyond MAX_BOUND, 1024).
 func load_model(m: VoxelModel, source_path: String = "") -> int:
-	var src: Dictionary = m.to_grid()
+	# Decodes every frame once: frame_grid() rebuilds the dictionary from the
+	# packed arrays on each call, so indexing it per cell is quadratic.
+	var decoded: Array[Dictionary] = [m.to_grid()]
+	for i in range(1, m.frame_count()):
+		decoded.append(m.frame_grid(i))
+	var decoded_mats: Array[Dictionary] = [m.to_material_grid()]
+	for i in range(1, m.frame_count()):
+		decoded_mats.append(m.frame_material_grid(i))
+	var decoded_ovs: Array[Dictionary] = [m.to_override_grid()]
+	for i in range(1, m.frame_count()):
+		decoded_ovs.append(m.frame_override_grid(i))
 	var nb := Vector3i(
 		clampi(m.bounds.x, MIN_BOUND, MAX_BOUND),
 		clampi(m.bounds.y, MIN_BOUND, MAX_BOUND),
 		clampi(m.bounds.z, MIN_BOUND, MAX_BOUND))
-	for p: Vector3i in src:
-		nb = Vector3i(
-			clampi(maxi(nb.x, p.x + 1), MIN_BOUND, MAX_BOUND),
-			clampi(maxi(nb.y, p.y + 1), MIN_BOUND, MAX_BOUND),
-			clampi(maxi(nb.z, p.z + 1), MIN_BOUND, MAX_BOUND))
+	for cells: Dictionary in decoded:
+		for p: Vector3i in cells:
+			nb = Vector3i(
+				clampi(maxi(nb.x, p.x + 1), MIN_BOUND, MAX_BOUND),
+				clampi(maxi(nb.y, p.y + 1), MIN_BOUND, MAX_BOUND),
+				clampi(maxi(nb.z, p.z + 1), MIN_BOUND, MAX_BOUND))
 	bounds = nb
 	lights = {}
 	var dropped_lights: int = 0
@@ -1390,45 +1445,51 @@ func load_model(m: VoxelModel, source_path: String = "") -> int:
 			dropped_lights += 1
 	_recompute_next_light_id()
 	# Rebuild the frame store: base grid first, then extra frames from the
-	# model. Live dicts alias frame 0.
+	# model. Live dicts alias frame 0. Extra-frame times may be stored in the
+	# old layout (one duration per extra frame, frame 0 assumed 0.5) or the
+	# current one (one per frame, index-aligned).
 	frames.clear()
 	frame_times.clear()
 	frames.append({"grid": {}, "materials": {}, "overrides": {}})
-	frame_times.append(0.5)
+	frame_times.append(_load_frame_time(m, 0))
 	grid = frames[0]["grid"]
 	cell_materials = frames[0]["materials"]
 	cell_overrides = frames[0]["overrides"]
 	var dropped: int = 0
+	var src: Dictionary = decoded[0]
 	for p: Vector3i in src:
 		if in_bounds(p):
 			grid[p] = src[p]
 		else:
 			dropped += 1
-	var loaded_materials: Dictionary = m.to_material_grid()
+	var loaded_materials: Dictionary = decoded_mats[0]
 	for p: Vector3i in loaded_materials:
 		if grid.has(p):
 			cell_materials[p] = int(loaded_materials[p])
-	var loaded_overrides: Dictionary = m.to_override_grid()
+	var loaded_overrides: Dictionary = decoded_ovs[0]
 	for p: Vector3i in loaded_overrides:
 		if grid.has(p):
 			cell_overrides[p] = int(loaded_overrides[p])
 	for i in range(1, m.frame_count()):
+		var src_frame: Dictionary = decoded[i]
 		var kept: Dictionary = {}
-		for p: Vector3i in m.frame_grid(i):
+		for p: Vector3i in src_frame:
 			if in_bounds(p):
-				kept[p] = m.frame_grid(i)[p]
-		var fmg: Dictionary = m.frame_material_grid(i)
+				kept[p] = src_frame[p]
+			else:
+				dropped += 1
+		var fmg: Dictionary = decoded_mats[i]
 		var fm: Dictionary = {}
 		for p: Vector3i in fmg:
 			if kept.has(p):
 				fm[p] = int(fmg[p])
-		var fog: Dictionary = m.frame_override_grid(i)
+		var fog: Dictionary = decoded_ovs[i]
 		var fo: Dictionary = {}
 		for p: Vector3i in fog:
 			if kept.has(p):
 				fo[p] = int(fog[p])
 		frames.append({"grid": kept, "materials": fm, "overrides": fo})
-		frame_times.append(float(m.anim_frame_times[i - 1]) if i - 1 < m.anim_frame_times.size() else 0.5)
+		frame_times.append(_load_frame_time(m, i))
 	anim_mode = clampi(m.anim_mode, 0, 2)
 	current_frame = 0
 	voxel_size = m.voxel_size
