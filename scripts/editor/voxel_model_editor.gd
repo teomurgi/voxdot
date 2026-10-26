@@ -1814,6 +1814,7 @@ func _on_character_preset_selected(index: int) -> void:
 	if character_rig == null:
 		return
 	character_rig.apply_preset(int(_character_preset_option.get_item_id(index)))
+	doc.set_character_style(character_rig.character_style())
 	_character_anim_label.text = "Preset: %s" % str(VoxelCharacterRig.PRESETS[character_rig.current_preset][&"name"])
 
 
@@ -1829,6 +1830,7 @@ func _on_character_slot_committed(slot: StringName, model_path: String) -> void:
 		_refresh_character_ui()
 		_say("Character %s: procedural" % str(slot))
 		return
+	trimmed = VoxelModel.resolve_asset_path(trimmed, doc.path.get_base_dir())
 	var err: String = character_rig.set_slot_model(slot, trimmed)
 	if err != "":
 		_say(err)
@@ -2288,7 +2290,7 @@ func _on_library_file_selected(chosen: String) -> void:
 	if p.get_extension() == "":
 		p += ".tres"
 	var model: VoxelModel = doc.to_model()
-	var err: Error = ResourceSaver.save(model, p, ResourceSaver.FLAG_RELATIVE_PATHS)
+	var err: Error = model.save_portable(p)
 	if err != OK:
 		_say("Save copy failed (%s): %s" % [error_string(err), p])
 		return
@@ -2663,7 +2665,7 @@ func _default_dir() -> String:
 	var docs: String = OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
 	if docs == "":
 		docs = OS.get_user_data_dir()
-	var dir: String = docs.path_join(APP_TITLE)
+	var dir: String = docs.path_join("voxdot")
 	DirAccess.make_dir_recursive_absolute(dir)
 	return dir
 
@@ -3178,9 +3180,14 @@ func _on_meta_changed() -> void:
 func _sync_character_slots() -> void:
 	if character_rig == null:
 		return
+	if doc.character_style.is_empty():
+		character_rig.apply_preset(0)
+	else:
+		character_rig.apply_character_style(doc.character_style)
 	for slot: StringName in [&"helmet", &"chest", &"main_hand", &"off_hand"]:
 		var p: String = str(doc.character_slots.get(str(slot), ""))
-		character_rig.set_slot_model(slot, p)
+		character_rig.set_slot_model(slot, "")
+		character_rig.set_slot_model(slot, VoxelModel.resolve_asset_path(p, doc.path.get_base_dir()))
 	_refresh_character_ui()
 
 func _sync_ui_from_doc() -> void:

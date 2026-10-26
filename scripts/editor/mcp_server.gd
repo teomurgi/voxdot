@@ -1204,6 +1204,7 @@ func _tool_character_set_preset(args: Dictionary) -> Variant:
 	if idx < 0 or idx >= VoxelCharacterRig.PRESETS.size():
 		return _tool_error("preset must be 0..%d" % (VoxelCharacterRig.PRESETS.size() - 1))
 	rig.apply_preset(idx)
+	editor.doc.set_character_style(rig.character_style())
 	editor._refresh_character_ui()
 	return _character_state_payload()
 
@@ -1220,6 +1221,7 @@ func _tool_character_set_slot(args: Dictionary) -> Variant:
 			rig.set_armor_style(idx)
 		else:
 			rig.set_equipment(StringName(slot), idx)
+		editor.doc.set_character_style(rig.character_style())
 		editor._refresh_character_ui()
 		return _character_state_payload()
 	if not args.has("path"):
@@ -1230,6 +1232,7 @@ func _tool_character_set_slot(args: Dictionary) -> Variant:
 		editor.doc.set_character_slot(slot, "")
 		editor._refresh_character_ui()
 		return _character_state_payload()
+	p = VoxelModel.resolve_asset_path(p, editor.doc.path.get_base_dir())
 	var err: String = editor.character_rig.set_slot_model(StringName(slot), p)
 	if err != "":
 		return _tool_error(err)

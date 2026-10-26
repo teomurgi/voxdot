@@ -554,6 +554,6 @@ func _test_standalone() -> void:
 	_ed._confirm_dialog.confirmed.emit()
 	_check(_ed.doc.voxel_count() == 1, "confirming the prompt then opens the dropped file")
 	var dd: String = _ed._default_dir()
-	_check(dd.ends_with("Voxdot") and DirAccess.dir_exists_absolute(dd), "default save dir is <Documents>/Voxdot and exists")
+	_check(dd.ends_with("voxdot") and DirAccess.dir_exists_absolute(dd), "default save dir is <Documents>/voxdot and exists")
 	DirAccess.remove_absolute(model_path)
 	DirAccess.remove_absolute(dir)

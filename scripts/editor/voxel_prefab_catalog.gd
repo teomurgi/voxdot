@@ -17,7 +17,7 @@ const SKIP_DIRS: Array[String] = [".godot", ".import"]
 
 var project_dir: String = ""
 ## Test hook: when set, replaces the OS Documents-based user library so tests
-## never touch the real `~/Documents/Voxdot/Prefabs`.
+## never touch the real `~/Documents/voxdot/Prefabs`.
 var user_library_override: String = ""
 
 var _assets: Array[Dictionary] = []
@@ -33,7 +33,7 @@ func user_library() -> String:
 	var docs: String = OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
 	if docs == "":
 		docs = OS.get_user_data_dir()
-	return docs.path_join("Voxdot").path_join("Prefabs")
+	return docs.path_join("voxdot").path_join("Prefabs")
 
 
 func project_library(open_model_dir: String = "") -> String:

@@ -30,6 +30,16 @@ extends Node3D
 		if _built:
 			rebuild()
 
+## Flipbooks animate visual cells only. Collision/material queries stay on
+## frame zero, so a decorative flame cannot rebuild physics every frame.
+@export var autoplay: bool = true
+@export var animate_in_editor: bool = false
+var current_frame: int = 0
+var playing: bool = false
+var _elapsed: float = 0.0
+var _direction: int = 1
+var _frame_meshes: Dictionary = {}
+
 var _built: bool = false
 var _cell_data: Dictionary = {}
 var _walkable: Array[Vector3i] = []
@@ -45,6 +55,11 @@ func rebuild() -> void:
 	for child: Node in get_children():
 		remove_child(child)
 		child.queue_free()
+	playing = false
+	current_frame = 0
+	_elapsed = 0.0
+	_direction = 1
+	_frame_meshes.clear()
 	_cell_data = {}
 	_walkable.clear()
 	_walkable_built = false
@@ -54,6 +69,8 @@ func rebuild() -> void:
 	mi.name = "Mesh"
 	mi.mesh = model.build_mesh()
 	add_child(mi)
+	_frame_meshes[0] = mi.mesh
+	playing = autoplay and model.frame_count() > 1
 	model.build_lights(self)
 	_add_missing_debug()
 	if not with_collision or Engine.is_editor_hint():
@@ -151,3 +168,62 @@ func _missing_box(inst: VoxelPrefabInstance) -> MeshInstance3D:
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	mi.position = (box.position + box.size * 0.5) * model.voxel_size
 	return mi
+
+
+func play() -> void:
+	set_frame(0)
+	_elapsed = 0.0
+	_direction = 1
+	playing = model != null and model.frame_count() > 1
+
+
+func stop() -> void:
+	playing = false
+
+
+func frame_duration(frame: int) -> float:
+	if model == null:
+		return 0.5
+	var times: PackedFloat32Array = model.anim_frame_times
+	# Accept legacy extra-frame-only timings, like VoxelDocument.
+	var index: int = frame if times.size() >= model.frame_count() else frame - 1
+	if index < 0 or index >= times.size() or not is_finite(times[index]):
+		return 0.5
+	return clampf(times[index], 0.05, 10.0)
+
+
+func set_frame(frame: int) -> void:
+	if model == null or frame < 0 or frame >= model.frame_count():
+		return
+	var mesh_node := get_node_or_null("Mesh") as MeshInstance3D
+	if mesh_node == null:
+		return
+	if not _frame_meshes.has(frame):
+		# Prefabs remain present across frames; only the local voxel layer changes.
+		var visual := VoxelModel.new()
+		visual.voxel_size = model.voxel_size
+		visual.set_grid(model.frame_grid(frame))
+		visual.prefab_instances = model.prefab_instances
+		_frame_meshes[frame] = visual.build_mesh()
+	mesh_node.mesh = _frame_meshes[frame]
+	current_frame = frame
+
+
+func _process(delta: float) -> void:
+	if not playing or model == null or (Engine.is_editor_hint() and not animate_in_editor):
+		return
+	_elapsed += delta
+	while playing and _elapsed >= frame_duration(current_frame):
+		_elapsed -= frame_duration(current_frame)
+		var next: int = current_frame + _direction
+		if model.anim_mode == 2:
+			if next >= model.frame_count() or next < 0:
+				_direction = -_direction
+				next = current_frame + _direction
+		elif next >= model.frame_count():
+			if model.anim_mode == 1:
+				next = 0
+			else:
+				playing = false
+				break
+		set_frame(next)

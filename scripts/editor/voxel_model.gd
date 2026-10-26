@@ -74,6 +74,8 @@ const LIGHT_STRIDE: int = 10
 ## external-reference pattern as prefab sources: paths only, never embedded
 ## geometry. Empty means the procedural part grid is used.
 @export var character_slots: Dictionary = {}
+## Optional procedural appearance (preset and slot indices); empty preserves defaults.
+@export var character_style: Dictionary = {}
 
 
 func voxel_count() -> int:
@@ -469,7 +471,15 @@ func prefab_summary() -> Dictionary:
 func resolve_prefab_sources(base_dir: String) -> int:
 	var resolved: int = 0
 	for inst: VoxelPrefabInstance in prefab_instances:
-		if inst == null or inst.source != null:
+		if inst == null:
+			continue
+		var local_path: String = resolve_asset_path(inst.source_path, base_dir)
+		if inst.source_path != "" and _path_exists(local_path):
+			inst.source = ResourceLoader.load(local_path, "", ResourceLoader.CACHE_MODE_IGNORE) as VoxelModel
+			if inst.source != null:
+				resolved += 1
+				continue
+		if inst.source != null:
 			continue
 		var path: String = ""
 		if inst.source_uid != "":
@@ -545,3 +555,55 @@ static func _cell_less(a: Vector3i, b: Vector3i) -> bool:
 	if a.z != b.z:
 		return a.z < b.z
 	return a.x < b.x
+
+
+## Resolve an asset path against the containing model, not the editor project.
+static func resolve_asset_path(path: String, base_dir: String) -> String:
+	if path == "" or path.is_absolute_path():
+		return path
+	return base_dir.path_join(path).simplify_path()
+
+
+static func relative_asset_path(base_dir: String, target: String) -> String:
+	var base: String = ProjectSettings.globalize_path(base_dir).simplify_path()
+	var dest: String = ProjectSettings.globalize_path(target).simplify_path()
+	var a: PackedStringArray = base.split("/", false)
+	var b: PackedStringArray = dest.split("/", false)
+	if a.is_empty() or b.is_empty() or a[0] != b[0]:
+		return target
+	var common: int = 0
+	while common < mini(a.size(), b.size()) and a[common] == b[common]:
+		common += 1
+	var parts := PackedStringArray()
+	for i in range(common, a.size()):
+		parts.append("..")
+	for i in range(common, b.size()):
+		parts.append(b[i])
+	return "/".join(parts)
+
+
+## ResourceSaver only relativizes resources inside its own res:// tree.
+## Normalize native asset dependencies too, so an external game's assets
+## remain portable. Script paths stay canonical res:// paths in both apps.
+func save_portable(target: String) -> Error:
+	var err: Error = ResourceSaver.save(self, target, ResourceSaver.FLAG_RELATIVE_PATHS)
+	if err != OK or target.get_extension().to_lower() != "tres":
+		return err
+	var lines: PackedStringArray = FileAccess.get_file_as_string(target).split("\n")
+	var pattern := RegEx.new()
+	pattern.compile(r'path="([^"\\]*(?:\\.[^"\\]*)*)"')
+	for i in lines.size():
+		if not lines[i].begins_with('[ext_resource type="Resource"'):
+			continue
+		var found: RegExMatch = pattern.search(lines[i])
+		if found == null:
+			continue
+		var original: String = found.get_string(1).c_unescape()
+		if original.is_absolute_path():
+			var relative: String = relative_asset_path(target.get_base_dir(), original)
+			lines[i] = lines[i].substr(0, found.get_start(1)) + relative.c_escape() + lines[i].substr(found.get_end(1))
+	var file := FileAccess.open(target, FileAccess.WRITE)
+	if file == null:
+		return FileAccess.get_open_error()
+	file.store_string("\n".join(lines))
+	return file.get_error()

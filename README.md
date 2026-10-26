@@ -88,7 +88,7 @@ Tests: `VOXDOT_MCP_PORT=7851 godot --headless --path . -s tests/mcp_server_test.
 
 Box depth extrudes Box / Box Erase. Model size (up to 1024 per axis) and real-world voxel size are in the panel.
 Shrinking the size is refused if voxels would be cut off. **Fit bounds to content** shrinks or grows W/H/D to the
-furthest occupied cell (the origin stays at 0). Files default to `~/Documents/Voxdot`.
+furthest occupied cell (the origin stays at 0). Files default to `~/Documents/voxdot`.
 The panel sections are collapsible — click a section header to fold it away. File, Model, Tool, Color, Material,
 View and Help live in the left panel; Sun, Atmosphere, point lights, Prefabs and Character live in the right **Scene** panel.
 Model, point lights, Prefabs and Help start folded so the common controls fit without scrolling.
@@ -130,7 +130,7 @@ distance of the camera are rendered, and it follows the camera as you fly. Raisi
 ## Prefabs
 
 Any saved model can be reused as a **linked prefab instance** inside another model. Press `B` to open the
-catalogue: a searchable thumbnail grid over two libraries — `~/Documents/Voxdot/Prefabs` (user) and
+catalogue: a searchable thumbnail grid over two libraries — `~/Documents/voxdot/Prefabs` (user) and
 `Prefabs/` next to the open model (project). The details pane sets a custom **pivot** in source cell space
 (multiples of 0.5), either with the numeric fields or by clicking in the preview. Each asset gets a stable ID
 and its metadata lives in `<library>/.voxdot/catalogue.cfg`; thumbnails are cached under `user://prefab_thumbs/`.
@@ -197,13 +197,22 @@ godot --path . -s tools/make_screenshots.gd
 
 ## Using models in a game
 
-Copy these into your Godot project, keeping `voxel_model.gd` at **`res://scripts/editor/voxel_model.gd`**
+Voxdot is a standalone tool: new files default to `~/Documents/voxdot`.
+Choose your game project folder explicitly when authoring for a game (for RPG Forge,
+`godot/resources/`), or open an existing model by path. No asset-copy step is required. Prefab dependencies
+and character slot paths in `.tres` saves are relative to their containing model;
+Save As rebases links without copying the linked assets. Keep related `Prefabs/`
+and `Parts/` folders together when moving a world.
+
+Copy these runtime scripts into your Godot project, keeping `voxel_model.gd` at **`res://scripts/editor/voxel_model.gd`**
 (saved `.tres` files reference that path):
 
 - `scripts/editor/voxel_model.gd`
 - `scripts/editor/voxel_mesh_builder.gd`
+- `scripts/editor/voxel_material.gd`
 - `scripts/editor/voxel_prefab_instance.gd` (only needed for models that use prefabs)
 - `scripts/runtime/voxel_model_instance.gd` (optional)
+- `scripts/editor/voxel_character_parts.gd` and `scripts/runtime/voxel_character_visual.gd` (character presentation)
 
 Then either add a `VoxelModelInstance` node and assign the model (optional trimesh collision), or in code:
 `var mesh: ArrayMesh = (load("res://castle.tres") as VoxelModel).build_mesh()`. The mesh is scaled to the model's
@@ -220,6 +229,13 @@ Prefab sources are ordinary Godot dependencies. Keep the `Prefabs/` folder next 
 was moved as a unit, call `VoxelModel.load_with_prefabs("res://castle.tres")` instead of `load()` so the saved
 relative paths can re-resolve. Missing sources are skipped at runtime with a warning (the editor keeps a
 placeholder).
+
+`VoxelCharacterVisual` shares the preview rig with RPG Forge. Its `appearance`
+resource / `apply_model_loadout()` API applies saved procedural style and model
+slots, resolving paths relative to the containing model. Gameplay owns movement,
+damage and attack eligibility; the shared rig supplies poses, timing events and
+cancellation. `VoxelModelInstance` plays flipbooks (Once/Loop/Ping-pong); collision
+and material queries remain on frame zero while prefabs/lights persist.
 
 ## Tests
 
