@@ -93,8 +93,6 @@ var dirty: bool = false
 var prefab_instances: Array[VoxelPrefabInstance] = []
 var prefab_light_budget: int = 64
 var prefab_composition: VoxelPrefabComposition = VoxelPrefabComposition.new()
-var character_slots: Dictionary = {}
-var character_style: Dictionary = {}
 ## Flipbook frames. `frames[i]` holds grid/materials/overrides/group dicts; the
 ## live grid and metadata dictionaries always alias `frames[current_frame]`
 ## (frame 0 is the base cells). Frame add/delete/switch are meta ops (saved,
@@ -707,23 +705,6 @@ func set_prefab_light_budget(value: int) -> bool:
 	var b: int = clampi(value, 0, 4096)
 	if b == prefab_light_budget:
 		return false
-	dirty = true
-	meta_changed.emit()
-	return true
-
-
-## Sets (or clears with an empty path) a character part slot override. Saved
-## with the model, not undoable. Returns false when unchanged.
-func set_character_slot(slot: String, model_path: String) -> bool:
-	var trimmed: String = model_path.strip_edges()
-	if trimmed.is_empty():
-		if not character_slots.has(slot):
-			return false
-		character_slots.erase(slot)
-	else:
-		if str(character_slots.get(slot, "")) == trimmed:
-			return false
-		character_slots[slot] = trimmed
 	dirty = true
 	meta_changed.emit()
 	return true
@@ -1352,8 +1333,6 @@ func reset() -> void:
 	prefab_instances.clear()
 	prefab_composition.clear()
 	prefab_light_budget = 64
-	character_slots.clear()
-	character_style.clear()
 	_undo_stack.clear()
 	_redo_stack.clear()
 	_stroke = {}
@@ -1392,8 +1371,6 @@ func to_model() -> VoxelModel:
 		if inst != null:
 			saved.append(inst.copy_for_save())
 	m.prefab_instances = saved
-	m.character_slots = character_slots.duplicate()
-	m.character_style = character_style.duplicate()
 	# Base cells are always frame 0, even when another frame is live.
 	var base: Dictionary = frames[0]["grid"] if not frames.is_empty() else grid
 	var base_mats: Dictionary = frames[0]["materials"] if not frames.is_empty() else cell_materials
@@ -1556,10 +1533,6 @@ func load_model(m: VoxelModel, source_path: String = "") -> int:
 		if inst != null:
 			prefab_instances.append(inst.copy_for_save())
 	prefab_light_budget = clampi(m.prefab_light_budget, 0, 4096)
-	character_style = m.character_style.duplicate()
-	character_slots = (m.character_slots as Dictionary).duplicate() if m.character_slots != null else {}
-	for slot: Variant in character_slots:
-		character_slots[slot] = VoxelModel.resolve_asset_path(str(character_slots[slot]), source_path.get_base_dir())
 	_next_prefab_id = 1
 	_recompute_next_prefab_id()
 	_reload_instance_sources(source_path.get_base_dir())
@@ -1592,9 +1565,6 @@ func save_file(target: String) -> Error:
 				continue
 			inst.source_path = VoxelModel.relative_asset_path(base_dir, inst.source.resource_path)
 			inst.source_uid = _uid_text_for(inst.source)
-	for slot: Variant in model.character_slots:
-		var absolute: String = VoxelModel.resolve_asset_path(str(model.character_slots[slot]), path.get_base_dir())
-		model.character_slots[slot] = VoxelModel.relative_asset_path(base_dir, absolute)
 	var err: Error = model.save_portable(target)
 	if err == OK:
 		# Keep the authored instances in sync with the fallback paths written
@@ -1740,11 +1710,3 @@ func _apply_material_raw(p: Vector3i, kind: int, bits: int, group_id: int = 0) -
 		cell_occluding_groups.erase(p)
 	else:
 		cell_occluding_groups[p] = group_id
-
-
-func set_character_style(style: Dictionary) -> void:
-	if character_style == style:
-		return
-	character_style = style.duplicate()
-	dirty = true
-	meta_changed.emit()

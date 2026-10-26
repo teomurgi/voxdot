@@ -174,22 +174,8 @@ Standalone voxel model editor on **Godot 4.7.2** (system binary `/usr/bin/godot`
     a higher cabin pad buries the yard instance). All-or-nothing placement refuses any overlap, so validate
     camera, so builder scripts must re-apply hero framing (and wait for chunk rebuilds) after the reload check
     before capturing the shipped screenshot — otherwise the PNG is a black frame.
-23. **Character editor port** (`voxel_character_parts.gd`, `voxel_character_rig.gd`): verbatim logic port of
-    rpg-forge's `VoxelPartLibrary`/`ModularCharacterRig` with renames only (`VoxelCharacterParts`,
-    `VoxelCharacterRig`; the 13-bone rig has no root bone, `hips` is the root — 14 was a wrong guess). Don't
-    alias a class_name in a `const` (`const PARTS = VoxelCharacterParts` is not a constant expression); call
-    the class directly. GDScript has no dict comprehensions in literals. The `CHARACTER` tool is on `K`, not
-    `C` — `C` is fly-down in WASD navigation (polled in `_update_navigation`). Slot models persist as paths
-    in `VoxelModel.character_slots` / `VoxelDocument.character_slots` (external-reference pattern like
-    prefabs, never embedded); the rig's `slot_models` holds the loaded models. Nesting refused like prefab
-    sources. The rig's export defaults are the Warrior preset; a fresh `character_get_state` reports
-    preset 0, not -1.
-24. **Character part authoring & screenshots**: `save_screenshot()` hides the character rig (it is in the
-    overlay-exclusion list), so character shots must capture the viewport with only the UI layer hidden —
-    otherwise the frame is an empty grid. Slot part grids attach via equipment holders in rig/hand-local
-    space where negative offsets are meaningful (helmet horns at x=-3, hammer head at y=-4, shield at z=-3),
-    so author parts in the segment frame (helmet shares the head's 8x8x8, brim y=5) and save WITHOUT
-    min-corner-to-origin normalization — shifting the hat to origin parked its brim at neck height.
+23. **(removed)** Character feature deleted; number kept to avoid renumbering cross-references.
+24. **(removed)** Character feature deleted; number kept to avoid renumbering cross-references.
 25. **Flipbook animation**: whole-model frames (`anim_frame_cells/palettes/materials/overrides/times` +
     `anim_mode` on `VoxelModel`; empty = static, old files unchanged). `VoxelDocument.frames` holds one dict
     per frame with the live `grid`/`cell_materials`/`cell_overrides` aliasing `frames[current_frame]`; stroke
@@ -210,21 +196,12 @@ Standalone voxel model editor on **Godot 4.7.2** (system binary `/usr/bin/godot`
     with `_load_frame_time()` accepting the legacy extra-only layout. Decode each frame once per load:
     `frame_grid()`/`frame_material_grid()`/`frame_override_grid()` rebuild the dictionary per call.
 
-27. **T-pose authoring, reference previews (2026-10-26)**: characters are authored, rendered and saved
-    in the rest (T-pose) bind pose — no pose state is stored (`character_style`/`character_slots` only).
-    `VoxelCharacterRig`/`VoxelCharacterVisual.reset_to_rest_pose()` restores bind bone poses; the
-    Character section's T-pose button stops previews via `_set_character_anim_state(0)` and Walk/Run/Attack
-    are reference-only. The editor tracks `_char_preview_active`/`_char_preview_idle` (6 s auto-return in
-    `_tick_character_preview()`, which also advances headless swing clocks via `_advance_attack()` since a
-    headless rig has no `_process`); `_begin_stroke`, `_set_anim_playing`, `_do_undo`/`_do_redo`, tool
-    switching and all MCP voxel/anim tools refuse while a preview runs. `character_get_state` reports
-    `preview_state`/`previewing` (`t-pose` accepted as a stop alias) and flipbook playback refuses during previews.
+27. **(removed)** Character feature deleted; number kept to avoid renumbering cross-references.
 
 28. **Game-owned assets and shared presentation (2026-10-26)**:
     - RPG Forge owns its models directly under its `godot/resources/` tree. Open/save those files in Voxdot; copying assets between repositories was temporary scaffolding. Shared runtime code is a separate dependency, synced by RPG Forge's `tools/sync_voxdot_runtime.py` with revision/content hashes and preserved existing script UIDs.
-    - `VoxelModel.save_portable()` normalizes native external asset references in `.tres` files because `ResourceSaver.FLAG_RELATIVE_PATHS` alone leaves absolute references outside Voxdot's `res://`. Script references remain canonical. Character slots save relative to the destination; load resolves them against the containing file. Save As rebases links without copying assets. Prefer valid parent-relative prefab fallbacks over old native references, even when the old files still exist.
-    - `scripts/runtime/voxel_character_visual.gd` owns the 13-bone rig, merged procedural armor, saved-model attachments, poses and cancellation. `VoxelCharacterRig` is the editor-facing wrapper; RPG Forge uses a `ModularCharacterRig` wrapper over a verbatim copy. Do not recreate the fork. `character_style` is additive/empty by default and persists procedural presets/slot indices alongside model overrides.
-    - `VoxelModelInstance` flipbooks animate the visual layer only; collision/material/walkability queries remain on frame zero, with persistent prefabs/lights. Timing accepts the legacy extra-only layout with a 0.5-second frame-zero default. Authored equipment uses the same instance implementation, so animation previews and gameplay match.
+    - `VoxelModel.save_portable()` normalizes native external asset references in `.tres` files because `ResourceSaver.FLAG_RELATIVE_PATHS` alone leaves absolute references outside Voxdot's `res://`. Script references remain canonical. Save As rebases links without copying assets. Prefer valid parent-relative prefab fallbacks over old native references, even when the old files still exist.
+    - `VoxelModelInstance` flipbooks animate the visual layer only; collision/material/walkability queries remain on frame zero, with persistent prefabs/lights. Timing accepts the legacy extra-only layout with a 0.5-second frame-zero default.
     - `tests/game_asset_authoring_test.gd -- <absolute-directory>` creates portable game fixtures; an extra `reopen` argument validates editing in place. RPG Forge's cross-project runner relocates that directory between author and consumer processes.
 
 29. **Standalone default directory**: New models default to the system Documents directory plus lowercase `voxdot` (`~/Documents/voxdot` on a typical Linux setup); the user prefab library is its `Prefabs/` subdirectory. The user explicitly chooses any game project directory. Open/Save dialogs for an existing model continue to use its current folder. Existing uppercase `Documents/Voxdot` assets are not moved automatically.

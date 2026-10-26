@@ -93,7 +93,7 @@ load.
 ## Commit and pull request style
 
 - One logical change per commit.
-- Subject line in the imperative mood, under 72 characters.
+- Subject line in the imperative mood, under 72 columns.
 - Body as a short bullet list describing what changed and why.
 - Reference the issue or feature in the body when there is one.
 - Open a pull request against `main` and describe the user-visible change.

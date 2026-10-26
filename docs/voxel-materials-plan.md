@@ -8,7 +8,7 @@ ideas that were deliberately left out of v1.
 Give every voxel enough metadata to answer, automatically:
 
 - Is it solid (does it contribute collision)?
-- Is it walkable (can a character stand on its top surface)?
+- Is it walkable (can an actor stand on its top surface)?
 - What material is it made of (tags such as stone/wood/liquid)?
 
 Authors should not have to tag every voxel by hand: assigning a material is enough,

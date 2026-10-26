@@ -74,12 +74,6 @@ const LIGHT_STRIDE: int = 10
 ## Soft editor warning threshold for instance lights (not a hard cap). The
 ## parent's own point lights keep their separate hard limit of 32.
 @export var prefab_light_budget: int = 64
-## Character part slot overrides (slot name -> saved-model path). Same
-## external-reference pattern as prefab sources: paths only, never embedded
-## geometry. Empty means the procedural part grid is used.
-@export var character_slots: Dictionary = {}
-## Optional procedural appearance (preset and slot indices); empty preserves defaults.
-@export var character_style: Dictionary = {}
 
 
 func voxel_count() -> int:

@@ -35,12 +35,11 @@ drag a `.tres` onto the window to open it.
 
 | | |
 |---|---|
-| Tools `1`-`9`, `M`, `0`, `K` | Place, Erase, Paint, Pick, Box, Box Erase, Fill, Light, Edit Light / Material / Prefab / Character |
+| Tools `1`-`9`, `M`, `0` | Place, Erase, Paint, Pick, Box, Box Erase, Fill, Light, Edit Light / Material / Prefab |
 | `B` | open the prefab catalogue |
 | Prefab gestures | click an instance to select, drag to move, `R` rotate 90°, `Ctrl+D` duplicate, `Delete` delete, `Esc` cancel/clear |
 | Material | pick a palette material; the Material tool repaints existing voxels; Solid/Walkable overrides are per-voxel; Pick samples color + material |
-| Character | pick a class preset, assign saved `.tres` part models per slot (helmet/chest/main_hand/off_hand; empty = procedural). Characters are authored in the rest T-pose; Walk/Run/Attack are unsaved reference previews that lock voxel editing and settle back to T-pose |
-| Animation | flipbook frames: duplicate the current frame and paint the next pose; per-frame seconds, Once/Loop/Ping-pong repeat, Play frames (voxels change — painting is refused while playing or while a character preview runs); rig previews stay in the Character section |
+| Animation | flipbook frames: duplicate the current frame and paint the next pose; per-frame seconds, Once/Loop/Ping-pong repeat, Play frames (voxels change — painting is refused while playing) |
 | Fly through the scene | hold `W` `A` `S` `D` relative to the view; `Space` / `C` for up / down; hold `Shift` to move faster |
 | Screenshot… | View-section button saves a PNG without the HUD, grid, bounds, or editing overlays |
 | `Q` `E` | rotate view 90 degrees |
@@ -73,12 +72,10 @@ prefab control (`prefab_list_assets`/`prefab_refresh_assets`/`prefab_get_asset`/
 `prefab_reset_pivot`, `prefab_place`/`prefab_list_instances`/`prefab_get_instance`/`prefab_move`/`prefab_rotate`/
 `prefab_duplicate`/`prefab_delete`/`prefab_unpack`/`prefab_relink`/`prefab_reload`/`prefab_get_state`,
 `get_composed_voxels`), plus `get_state`, `get_voxels` and `screenshot` so the agent can read back and *see* the
-result. `prefab_place` uses an explicit `allow_over_budget` flag instead of opening a modal dialog.
-Character rig control (`character_get_state`/`character_set_preset`/`character_set_slot`/
-`character_set_anim_state`/`character_play_attack`) drives the 13-bone preview rig: class presets, saved-model
-slot paths, and Walk/Run/Attack reference previews (never saved; voxel editing locks while one runs and the rig settles back to the authored T-pose). Flipbook control (`anim_get_state`/`anim_add_frame`/
-`anim_delete_frame`/`anim_set_frame`/`anim_set_frame_time`/`anim_set_mode`/`anim_play`/`anim_stop`) edits
-whole-model voxel frames with per-frame timing and once/loop/ping-pong repeat.
+result. `prefab_place` uses an explicit `allow_over_budget` flag instead of opening a modal dialog. Flipbook
+control (`anim_get_state`/`anim_add_frame`/`anim_delete_frame`/`anim_set_frame`/`anim_set_frame_time`/
+`anim_set_mode`/`anim_play`/`anim_stop`) edits whole-model voxel frames with per-frame timing and
+once/loop/ping-pong repeat.
 `GET /health` returns a status blob. Example:
 curl -s -X POST http://127.0.0.1:7850/ -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
   "params":{"name":"place_box","arguments":{"from":[4,0,4],"to":[7,3,7],"color":"e03a3a"}}}'
@@ -90,7 +87,7 @@ Box depth extrudes Box / Box Erase. Model size (up to 1024 per axis) and real-wo
 Shrinking the size is refused if voxels would be cut off. **Fit bounds to content** shrinks or grows W/H/D to the
 furthest occupied cell (the origin stays at 0). Files default to `~/Documents/voxdot`.
 The panel sections are collapsible — click a section header to fold it away. File, Model, Tool, Color, Material,
-View and Help live in the left panel; Sun, Atmosphere, point lights, Prefabs and Character live in the right **Scene** panel.
+View and Help live in the left panel; Sun, Atmosphere, point lights and Prefabs live in the right **Scene** panel.
 Model, point lights, Prefabs and Help start folded so the common controls fit without scrolling.
 
 ## Voxel materials
@@ -200,9 +197,9 @@ godot --path . -s tools/make_screenshots.gd
 Voxdot is a standalone tool: new files default to `~/Documents/voxdot`.
 Choose your game project folder explicitly when authoring for a game (for RPG Forge,
 `godot/resources/`), or open an existing model by path. No asset-copy step is required. Prefab dependencies
-and character slot paths in `.tres` saves are relative to their containing model;
-Save As rebases links without copying the linked assets. Keep related `Prefabs/`
-and `Parts/` folders together when moving a world.
+in `.tres` saves are relative to their containing model;
+Save As rebases links without copying the linked assets. Keep the related `Prefabs/`
+folder together when moving a world.
 
 Copy these runtime scripts into your Godot project, keeping `voxel_model.gd` at **`res://scripts/editor/voxel_model.gd`**
 (saved `.tres` files reference that path):
@@ -212,7 +209,6 @@ Copy these runtime scripts into your Godot project, keeping `voxel_model.gd` at 
 - `scripts/editor/voxel_material.gd`
 - `scripts/editor/voxel_prefab_instance.gd` (only needed for models that use prefabs)
 - `scripts/runtime/voxel_model_instance.gd` (optional)
-- `scripts/editor/voxel_character_parts.gd` and `scripts/runtime/voxel_character_visual.gd` (character presentation)
 
 Then either add a `VoxelModelInstance` node and assign the model (optional trimesh collision), or in code:
 `var mesh: ArrayMesh = (load("res://castle.tres") as VoxelModel).build_mesh()`. The mesh is scaled to the model's
@@ -230,11 +226,7 @@ was moved as a unit, call `VoxelModel.load_with_prefabs("res://castle.tres")` in
 relative paths can re-resolve. Missing sources are skipped at runtime with a warning (the editor keeps a
 placeholder).
 
-`VoxelCharacterVisual` shares the preview rig with RPG Forge. Its `appearance`
-resource / `apply_model_loadout()` API applies saved procedural style and model
-slots, resolving paths relative to the containing model. Gameplay owns movement,
-damage and attack eligibility; the shared rig supplies poses, timing events and
-cancellation. `VoxelModelInstance` plays flipbooks (Once/Loop/Ping-pong); collision
+`VoxelModelInstance` plays flipbooks (Once/Loop/Ping-pong); collision
 and material queries remain on frame zero while prefabs/lights persist.
 
 ## Tests
