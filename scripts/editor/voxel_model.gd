@@ -26,11 +26,14 @@ extends Resource
 ## Optional per-voxel solid/walkable overrides aligned with `cells`. Empty means
 ## every voxel inherits its material's flags. See VoxelMaterial.make_overrides().
 @export var material_overrides: PackedByteArray = PackedByteArray()
+## Optional per-voxel occluding group IDs aligned with `cells`. Empty means
+## every voxel is ungrouped (0); positive IDs identify renderable groups.
+@export var occluding_group_ids: PackedInt32Array = PackedInt32Array()
 ## Flipbook animation: extra frames beyond the base `cells`. Each entry of
 ## `anim_frame_cells` uses the same packed xyz+palette-index layout as `cells`
-## with its own palette in `anim_frame_palettes`; materials/overrides align
-## per frame (empty = default/inherit). `anim_frame_times` holds one duration
-## per frame, index-aligned (frame 0 first); older files stored only the extra
+## with its own palette in `anim_frame_palettes`; materials/overrides/groups
+## align per frame (empty = default/inherit/ungrouped). `anim_frame_times`
+## holds one duration per frame, index-aligned (frame 0 first); older files stored only the extra
 ## frames, which the editor still accepts (see VoxelDocument.load_model).
 ## `anim_mode` is 0=once, 1=loop, 2=ping-pong. All empty/zero = static model,
 ## so old files load unchanged and static models pay nothing.
@@ -38,6 +41,7 @@ extends Resource
 @export var anim_frame_palettes: Array[PackedColorArray] = []
 @export var anim_frame_materials: Array[PackedByteArray] = []
 @export var anim_frame_overrides: Array[PackedByteArray] = []
+@export var anim_frame_occluding_group_ids: Array[PackedInt32Array] = []
 @export var anim_frame_times: PackedFloat32Array = PackedFloat32Array()
 @export var anim_mode: int = 0
 ## id, x, y, z, red, green, blue, energy, range, shadows per point light.
@@ -99,10 +103,11 @@ func set_grid(grid: Dictionary) -> void:
 	set_cells(grid)
 
 
-## Replaces the stored voxels with `grid` plus sparse material/override maps.
-## Material arrays are only written when at least one voxel differs from the
-## defaults, keeping old-style files compact.
-func set_cells(grid: Dictionary, material_grid: Dictionary = {}, override_grid: Dictionary = {}) -> void:
+## Replaces the stored voxels with `grid` plus sparse material/override/group
+## maps. Metadata arrays are only written when at least one voxel differs from
+## the defaults, keeping old-style files compact.
+func set_cells(grid: Dictionary, material_grid: Dictionary = {}, override_grid: Dictionary = {},
+		occluding_group_grid: Dictionary = {}) -> void:
 	var keys: Array = grid.keys()
 	keys.sort_custom(_cell_less)
 	var new_palette := PackedColorArray()
@@ -121,14 +126,23 @@ func set_cells(grid: Dictionary, material_grid: Dictionary = {}, override_grid: 
 		var b: int = int(override_grid[p]) & 0xFF
 		if b != 0:
 			sparse_ovs[p] = b
+	var sparse_groups: Dictionary = {}
+	for p: Vector3i in occluding_group_grid:
+		var group_id: int = maxi(int(occluding_group_grid[p]), 0)
+		if group_id > 0:
+			sparse_groups[p] = group_id
 	var any_material: bool = not sparse_mats.is_empty()
 	var any_override: bool = not sparse_ovs.is_empty()
+	var any_group: bool = not sparse_groups.is_empty()
 	var mats := PackedByteArray()
 	var ovs := PackedByteArray()
+	var groups := PackedInt32Array()
 	if any_material:
 		mats.resize(keys.size())
 	if any_override:
 		ovs.resize(keys.size())
+	if any_group:
+		groups.resize(keys.size())
 	var o: int = 0
 	for p: Vector3i in keys:
 		var c: Color = grid[p]
@@ -144,11 +158,14 @@ func set_cells(grid: Dictionary, material_grid: Dictionary = {}, override_grid: 
 			mats[idx] = int(sparse_mats.get(p, VoxelMaterial.Kind.DEFAULT))
 		if any_override:
 			ovs[idx] = int(sparse_ovs.get(p, 0))
+		if any_group:
+			groups[idx] = int(sparse_groups.get(p, 0))
 		o += 4
 	palette = new_palette
 	cells = out
 	material_ids = mats if any_material else PackedByteArray()
 	material_overrides = ovs if any_override else PackedByteArray()
+	occluding_group_ids = groups if any_group else PackedInt32Array()
 
 
 ## Sparse { Vector3i: material Kind } for voxels that do not use the default.
@@ -175,6 +192,20 @@ func to_override_grid() -> Dictionary:
 		var bits: int = int(material_overrides[i])
 		if bits != 0:
 			out[Vector3i(cells[i * 4], cells[i * 4 + 1], cells[i * 4 + 2])] = bits
+	return out
+
+
+## Sparse { Vector3i: occluding group ID } for grouped voxels. Empty or
+## misaligned storage means every voxel is ungrouped, preserving old assets.
+func to_occluding_group_grid() -> Dictionary:
+	var out: Dictionary = {}
+	var n: int = voxel_count()
+	if occluding_group_ids.size() != n:
+		return out
+	for i in n:
+		var group_id: int = occluding_group_ids[i]
+		if group_id > 0:
+			out[Vector3i(cells[i * 4], cells[i * 4 + 1], cells[i * 4 + 2])] = group_id
 	return out
 
 
@@ -210,6 +241,24 @@ func frame_override_grid(i: int) -> Dictionary:
 	return _frame_byte_grid(i, false)
 
 
+func frame_occluding_group_grid(i: int) -> Dictionary:
+	if i <= 0:
+		return to_occluding_group_grid()
+	var out: Dictionary = {}
+	var j: int = i - 1
+	if j >= anim_frame_cells.size() or j >= anim_frame_occluding_group_ids.size():
+		return out
+	var packed: PackedInt32Array = anim_frame_cells[j]
+	var groups: PackedInt32Array = anim_frame_occluding_group_ids[j]
+	if groups.size() != packed.size() >> 2:
+		return out
+	for k in groups.size():
+		var group_id: int = groups[k]
+		if group_id > 0:
+			out[Vector3i(packed[k * 4], packed[k * 4 + 1], packed[k * 4 + 2])] = group_id
+	return out
+
+
 func _frame_byte_grid(i: int, want_material: bool) -> Dictionary:
 	var out: Dictionary = {}
 	if i <= 0:
@@ -230,7 +279,8 @@ func _frame_byte_grid(i: int, want_material: bool) -> Dictionary:
 
 ## Appends the packed encoding of `grid` as a new frame. Mirrors `set_cells`
 ## (sorted keys, per-frame palette, sparse metadata) without touching the base.
-func append_frame(grid: Dictionary, material_grid: Dictionary = {}, override_grid: Dictionary = {}) -> void:
+func append_frame(grid: Dictionary, material_grid: Dictionary = {}, override_grid: Dictionary = {},
+		occluding_group_grid: Dictionary = {}) -> void:
 	var keys: Array = grid.keys()
 	keys.sort_custom(_cell_less)
 	var new_palette := PackedColorArray()
@@ -245,16 +295,25 @@ func append_frame(grid: Dictionary, material_grid: Dictionary = {}, override_gri
 		var b: int = int(override_grid[p]) & 0xFF
 		if b != 0:
 			sparse_ovs[p] = b
+	var sparse_groups: Dictionary = {}
+	for p: Vector3i in occluding_group_grid:
+		var group_id: int = maxi(int(occluding_group_grid[p]), 0)
+		if group_id > 0:
+			sparse_groups[p] = group_id
 	var any_material: bool = not sparse_mats.is_empty()
 	var any_override: bool = not sparse_ovs.is_empty()
+	var any_group: bool = not sparse_groups.is_empty()
 	var out := PackedInt32Array()
 	out.resize(keys.size() * 4)
 	var mats := PackedByteArray()
 	var ovs := PackedByteArray()
+	var groups := PackedInt32Array()
 	if any_material:
 		mats.resize(keys.size())
 	if any_override:
 		ovs.resize(keys.size())
+	if any_group:
+		groups.resize(keys.size())
 	var o: int = 0
 	for p: Vector3i in keys:
 		var c: Color = grid[p]
@@ -270,11 +329,14 @@ func append_frame(grid: Dictionary, material_grid: Dictionary = {}, override_gri
 			mats[idx] = int(sparse_mats.get(p, VoxelMaterial.Kind.DEFAULT))
 		if any_override:
 			ovs[idx] = int(sparse_ovs.get(p, 0))
+		if any_group:
+			groups[idx] = int(sparse_groups.get(p, 0))
 		o += 4
 	anim_frame_cells.append(out)
 	anim_frame_palettes.append(new_palette)
 	anim_frame_materials.append(mats)
 	anim_frame_overrides.append(ovs)
+	anim_frame_occluding_group_ids.append(groups)
 	# Times stay the document's job: _persist_frames appends one per frame.
 
 ## Builds a render mesh at this model's real-world voxel size. Prefab
@@ -299,6 +361,54 @@ func build_composed_grid() -> Dictionary:
 			if not grid.has(world):
 				grid[world] = src[c]
 	return grid
+
+
+## Grouped composed render colors keyed by (prefab instance ID, occluding
+## group ID). Local cells use instance ID 0. The requested frame applies only
+## to local cells; prefab sources use their base frame like the static runtime.
+func build_occluding_groups(frame: int = 0) -> Dictionary:
+	return build_render_grids(frame)["groups"]
+
+
+## All composed render colors partitioned into an ungrouped base and disjoint
+## occluding groups. Ownership matches build_composed_grid(): local cells win,
+## then earlier prefab instances win; unresolved and nested sources are skipped.
+func build_render_grids(frame: int = 0) -> Dictionary:
+	var base: Dictionary = {}
+	var groups: Dictionary = {}
+	var claimed: Dictionary = {}
+	var local: Dictionary = frame_grid(frame)
+	var local_groups: Dictionary = frame_occluding_group_grid(frame)
+	for c: Vector3i in local:
+		claimed[c] = true
+		var group_id: int = int(local_groups.get(c, 0))
+		if group_id > 0:
+			var key := Vector2i(0, group_id)
+			var group: Dictionary = groups.get(key, {})
+			group[c] = local[c]
+			groups[key] = group
+		else:
+			base[c] = local[c]
+	for inst: VoxelPrefabInstance in prefab_instances:
+		if inst == null or inst.source == null or not inst.source.prefab_instances.is_empty():
+			continue
+		var src: Dictionary = inst.source.to_grid()
+		var src_groups: Dictionary = inst.source.to_occluding_group_grid()
+		for c: Vector3i in src:
+			var world: Vector3i = inst.anchor + VoxelPrefabInstance.cell_offset(
+					c, inst.pivot, inst.yaw_quarters)
+			if claimed.has(world):
+				continue
+			claimed[world] = true
+			var group_id: int = int(src_groups.get(c, 0))
+			if group_id > 0:
+				var key := Vector2i(inst.instance_id, group_id)
+				var group: Dictionary = groups.get(key, {})
+				group[world] = src[c]
+				groups[key] = group
+			else:
+				base[world] = src[c]
+	return {"base": base, "groups": groups}
 
 
 ## Composed colors, materials and overrides in one pass. Local cells win over

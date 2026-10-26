@@ -38,7 +38,13 @@ var current_frame: int = 0
 var playing: bool = false
 var _elapsed: float = 0.0
 var _direction: int = 1
-var _frame_meshes: Dictionary = {}
+var _frame_render: Dictionary = {}
+var _hidden_occluding_groups: Dictionary = {}
+var _occluding_group_nodes: Dictionary = {}
+## Current frame's occluding groups, keyed by
+## Vector2i(prefab_instance_id, occluding_group_id). Each value contains the
+## MeshInstance3D, its model-space cells and their broad-phase AABB.
+var occluding_groups: Dictionary = {}
 
 var _built: bool = false
 var _cell_data: Dictionary = {}
@@ -59,7 +65,10 @@ func rebuild() -> void:
 	current_frame = 0
 	_elapsed = 0.0
 	_direction = 1
-	_frame_meshes.clear()
+	_frame_render.clear()
+	_hidden_occluding_groups.clear()
+	_occluding_group_nodes.clear()
+	occluding_groups.clear()
 	_cell_data = {}
 	_walkable.clear()
 	_walkable_built = false
@@ -67,9 +76,8 @@ func rebuild() -> void:
 		return
 	var mi := MeshInstance3D.new()
 	mi.name = "Mesh"
-	mi.mesh = model.build_mesh()
 	add_child(mi)
-	_frame_meshes[0] = mi.mesh
+	_apply_render_frame(0)
 	playing = autoplay and model.frame_count() > 1
 	model.build_lights(self)
 	_add_missing_debug()
@@ -170,6 +178,62 @@ func _missing_box(inst: VoxelPrefabInstance) -> MeshInstance3D:
 	return mi
 
 
+func _render_frame(frame: int) -> Dictionary:
+	if not _frame_render.has(frame):
+		var grids: Dictionary = model.build_render_grids(frame)
+		var groups: Dictionary = {}
+		for key: Vector2i in grids["groups"]:
+			var grid: Dictionary = grids["groups"][key]
+			var cells: Array[Vector3i] = []
+			cells.assign(grid.keys())
+			var vs: float = model.voxel_size
+			var bounds := AABB()
+			for i in cells.size():
+				var box := AABB(Vector3(cells[i]) * vs, Vector3.ONE * vs)
+				bounds = box if i == 0 else bounds.merge(box)
+			groups[key] = {
+				"mesh": VoxelMeshBuilder.build_mesh(grid, model.voxel_size),
+				"cells": cells,
+				"bounds": bounds,
+			}
+		_frame_render[frame] = {
+			"mesh": VoxelMeshBuilder.build_mesh(grids["base"], model.voxel_size),
+			"groups": groups,
+		}
+	return _frame_render[frame]
+
+
+func _apply_render_frame(frame: int) -> void:
+	var render: Dictionary = _render_frame(frame)
+	(get_node("Mesh") as MeshInstance3D).mesh = render["mesh"]
+	occluding_groups.clear()
+	for key: Vector2i in render["groups"]:
+		var info: Dictionary = render["groups"][key]
+		var node := _occluding_group_nodes.get(key) as MeshInstance3D
+		if node == null:
+			node = MeshInstance3D.new()
+			node.name = "OccludingGroup_%d_%d" % [key.x, key.y]
+			add_child(node)
+			_occluding_group_nodes[key] = node
+		node.mesh = info["mesh"]
+		node.visible = not _hidden_occluding_groups.has(key)
+		info["node"] = node
+		occluding_groups[key] = info
+	for key: Vector2i in _occluding_group_nodes:
+		if not occluding_groups.has(key):
+			(_occluding_group_nodes[key] as MeshInstance3D).visible = false
+
+
+func set_occluding_group_hidden(key: Vector2i, hidden: bool) -> void:
+	if hidden:
+		_hidden_occluding_groups[key] = true
+	else:
+		_hidden_occluding_groups.erase(key)
+	var node := _occluding_group_nodes.get(key) as MeshInstance3D
+	if node != null:
+		node.visible = not hidden and occluding_groups.has(key)
+
+
 func play() -> void:
 	set_frame(0)
 	_elapsed = 0.0
@@ -195,17 +259,9 @@ func frame_duration(frame: int) -> float:
 func set_frame(frame: int) -> void:
 	if model == null or frame < 0 or frame >= model.frame_count():
 		return
-	var mesh_node := get_node_or_null("Mesh") as MeshInstance3D
-	if mesh_node == null:
+	if get_node_or_null("Mesh") == null:
 		return
-	if not _frame_meshes.has(frame):
-		# Prefabs remain present across frames; only the local voxel layer changes.
-		var visual := VoxelModel.new()
-		visual.voxel_size = model.voxel_size
-		visual.set_grid(model.frame_grid(frame))
-		visual.prefab_instances = model.prefab_instances
-		_frame_meshes[frame] = visual.build_mesh()
-	mesh_node.mesh = _frame_meshes[frame]
+	_apply_render_frame(frame)
 	current_frame = frame
 
 

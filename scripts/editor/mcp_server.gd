@@ -257,12 +257,26 @@ func _tool_anim_get_state(_args: Dictionary) -> Variant:
 	return _anim_state_payload()
 
 
+## Structural flipbook edits need the voxels unlocked: a character preview
+## locks the same editing path as the UI stroke guard.
+func _refuse_anim_edit() -> Variant:
+	if editor._char_preview_active:
+		return _tool_error("stop the character preview before editing frames")
+	return null
+
+
 func _tool_anim_add_frame(_args: Dictionary) -> Variant:
+	var refused: Variant = _refuse_anim_edit()
+	if refused != null:
+		return refused
 	editor._anim_add_frame()
 	return _anim_state_payload()
 
 
 func _tool_anim_delete_frame(args: Dictionary) -> Variant:
+	var refused: Variant = _refuse_anim_edit()
+	if refused != null:
+		return refused
 	var i: int = int(args.get("frame", editor.doc.current_frame))
 	if not editor.doc.delete_frame(i):
 		return _tool_error("cannot delete the only frame")
@@ -277,6 +291,9 @@ func _tool_anim_set_frame(args: Dictionary) -> Variant:
 		return _tool_error("stop playback before switching frames")
 	if editor._stroking:
 		return _tool_error("finish the stroke before switching frames")
+	var refused: Variant = _refuse_anim_edit()
+	if refused != null:
+		return refused
 	editor.doc.goto_frame(int(args["frame"]))
 	editor._refresh_animation_ui()
 	return _anim_state_payload()
@@ -285,6 +302,9 @@ func _tool_anim_set_frame(args: Dictionary) -> Variant:
 func _tool_anim_set_frame_time(args: Dictionary) -> Variant:
 	if not args.has("frame") or not args.has("secs"):
 		return _tool_error("frame and secs are required")
+	var refused: Variant = _refuse_anim_edit()
+	if refused != null:
+		return refused
 	if not editor.doc.set_frame_time(int(args["frame"]), float(args["secs"])):
 		return _tool_error("frame out of range")
 	editor._refresh_animation_ui()
@@ -296,12 +316,18 @@ func _tool_anim_set_mode(args: Dictionary) -> Variant:
 	var m: String = str(args.get("mode", "loop"))
 	if not modes.has(m):
 		return _tool_error("mode must be one of once, loop, ping-pong")
+	var refused: Variant = _refuse_anim_edit()
+	if refused != null:
+		return refused
 	editor.doc.set_anim_mode(int(modes[m]))
 	editor._refresh_animation_ui()
 	return _anim_state_payload()
 
 
 func _tool_anim_play(_args: Dictionary) -> Variant:
+	var refused: Variant = _refuse_anim_edit()
+	if refused != null:
+		return refused
 	editor._set_anim_playing(true)
 	return _anim_state_payload()
 
@@ -415,6 +441,19 @@ func _tool_get_voxel(args: Dictionary) -> Variant:
 	return payload
 
 
+## Voxel edits (UI stroke path and direct document calls alike) are refused
+## while a reference animation preview or flipbook playback runs. The authored
+## model is always the rest (T-pose) bind pose.
+func _refuse_voxel_edit() -> Variant:
+	if editor._anim_playing:
+		return _tool_error("stop frame playback before editing voxels")
+	if editor._char_preview_active:
+		return _tool_error("stop the character preview before editing voxels")
+	if editor._stroking:
+		return _tool_error("finish the stroke before editing voxels")
+	return null
+
+
 func _tool_paint_material(args: Dictionary) -> Variant:
 	var cell: Variant = _arg_vec3i(args, "cell")
 	if cell == null:
@@ -430,9 +469,11 @@ func _tool_paint_material(args: Dictionary) -> Variant:
 	editor._set_material(kind)
 	editor._set_material_overrides(VoxelMaterial.solid_override(bits),
 		VoxelMaterial.walkable_override(bits))
+	var refused: Variant = _refuse_voxel_edit()
+	if refused != null:
+		return refused
 	editor.doc.paint_material([cell], kind, bits)
 	return _material_payload(kind, bits)
-
 
 func _tool_place(args: Dictionary) -> Variant:
 	var cell: Variant = _arg_vec3i(args, "cell")
@@ -447,6 +488,9 @@ func _tool_place(args: Dictionary) -> Variant:
 			return _tool_error("unknown material: " + str(args.get("material")))
 		kind = _material_id(args.get("material"), kind)
 		bits = _material_bits(args, 0)
+	var refused: Variant = _refuse_voxel_edit()
+	if refused != null:
+		return refused
 	editor.doc.place_cells([cell], editor.color, kind, bits)
 	return {"placed": [cell.x, cell.y, cell.z], "count": editor.doc.voxel_count(),
 		"material": VoxelMaterial.id(kind)}
@@ -456,6 +500,9 @@ func _tool_erase(args: Dictionary) -> Variant:
 	var cell: Variant = _arg_vec3i(args, "cell")
 	if cell == null:
 		return _tool_error("cell must be [x, y, z]")
+	var refused: Variant = _refuse_voxel_edit()
+	if refused != null:
+		return refused
 	editor.doc.erase_cells([cell])
 	return {"count": editor.doc.voxel_count()}
 
@@ -467,6 +514,9 @@ func _tool_paint(args: Dictionary) -> Variant:
 	var c: Variant = _parse_color(args.get("color"))
 	if c != null:
 		editor._set_color(c)
+	var refused: Variant = _refuse_voxel_edit()
+	if refused != null:
+		return refused
 	editor.doc.paint_cells([cell], editor.color)
 	return {"count": editor.doc.voxel_count()}
 
@@ -481,6 +531,9 @@ func _tool_fill(args: Dictionary) -> Variant:
 	if c != null:
 		editor._set_color(c)
 	var cells: Array[Vector3i] = editor.doc.flood_cells(cell)
+	var refused: Variant = _refuse_voxel_edit()
+	if refused != null:
+		return refused
 	editor.doc.paint_cells(cells, editor.color)
 	return {"filled": cells.size()}
 
@@ -512,6 +565,9 @@ func _tool_place_voxels(args: Dictionary) -> Variant:
 			return _tool_error("unknown material: " + str(args.get("material")))
 		kind = _material_id(args.get("material"), editor.current_material)
 		bits = _material_bits(args, 0)
+	var refused: Variant = _refuse_voxel_edit()
+	if refused != null:
+		return refused
 	var written: int = editor.doc.write_cells(cells, kind, bits)
 	return {"placed": written, "count": editor.doc.voxel_count()}
 
@@ -526,6 +582,9 @@ func _tool_place_box(args: Dictionary) -> Variant:
 	if not erase and args.has("material") and not VoxelMaterial.is_known_id(str(args.get("material"))):
 		return _tool_error("unknown material: " + str(args.get("material")))
 	var c: Variant = _parse_color(args.get("color"))
+	var refused: Variant = _refuse_voxel_edit()
+	if refused != null:
+		return refused
 	if erase:
 		editor.doc.erase_cells(cells)
 	else:
@@ -542,9 +601,14 @@ func _tool_place_box(args: Dictionary) -> Variant:
 
 ## Stroke trio: mirrors an LMB drag. begin locks the drag plane from the
 ## first cell's face, updates move along it, end commits one undo step.
+## Refused while a preview or playback locks voxel editing (see _begin_stroke).
 func _tool_begin_stroke(args: Dictionary) -> Variant:
 	if editor._stroking:
 		return _tool_error("a stroke is already active")
+	if editor._anim_playing:
+		return _tool_error("stop frame playback before editing voxels")
+	if editor._char_preview_active:
+		return _tool_error("stop the character preview before editing voxels")
 	var cell: Variant = _arg_vec3i(args, "cell")
 	if cell == null:
 		return _tool_error("cell must be [x, y, z]")
@@ -566,7 +630,6 @@ func _tool_begin_stroke(args: Dictionary) -> Variant:
 	}
 	editor._begin_stroke(h)
 	return {"stroking": editor._stroking}
-
 
 func _tool_update_stroke(args: Dictionary) -> Variant:
 	if not editor._stroking:
@@ -615,10 +678,16 @@ func _tool_pick(args: Dictionary) -> Variant:
 
 
 func _tool_undo(_args: Dictionary) -> Variant:
+	var refused: Variant = _refuse_voxel_edit()
+	if refused != null:
+		return refused
 	return {"undone": editor.doc.undo(), "count": editor.doc.voxel_count()}
 
 
 func _tool_redo(_args: Dictionary) -> Variant:
+	var refused: Variant = _refuse_voxel_edit()
+	if refused != null:
+		return refused
 	return {"redone": editor.doc.redo(), "count": editor.doc.voxel_count()}
 
 
@@ -1178,6 +1247,7 @@ func _character_state_payload() -> Dictionary:
 	var models: Dictionary = {}
 	for k: Variant in editor.doc.character_slots:
 		models[str(k)] = str(editor.doc.character_slots[k])
+	var previewing: bool = editor._char_preview_active or rig.is_attacking() or int(rig.state) != 0
 	return {
 		"preset": rig.current_preset,
 		"preset_name": str(VoxelCharacterRig.PRESETS[rig.current_preset][&"name"]) if rig.current_preset >= 0 else "",
@@ -1188,7 +1258,8 @@ func _character_state_payload() -> Dictionary:
 			"off_hand": int(rig.current.get(&"off_hand", 0)),
 		},
 		"slot_models": models,
-		"anim_state": ["idle", "walk", "run"][clampi(int(rig.state), 0, 2)],
+		"preview_state": editor._preview_state_label() if editor.character_rig != null else "T-pose",
+		"previewing": previewing,
 		"attacking": rig.is_attacking(),
 		"dirty": editor.doc.dirty,
 	}
@@ -1243,9 +1314,9 @@ func _tool_character_set_slot(args: Dictionary) -> Variant:
 
 func _tool_character_set_anim_state(args: Dictionary) -> Variant:
 	var name: String = str(args.get("state", "idle")).to_lower()
-	var ids: Dictionary = {"idle": 0, "walk": 1, "run": 2}
+	var ids: Dictionary = {"idle": 0, "walk": 1, "run": 2, "t-pose": 0, "tpose": 0, "stop": 0}
 	if not ids.has(name):
-		return _tool_error("state must be one of idle, walk, run")
+		return _tool_error("state must be one of idle, walk, run, t-pose")
 	editor._set_character_anim_state(int(ids[name]))
 	return _character_state_payload()
 
@@ -1455,11 +1526,11 @@ func _define_tools() -> Array[Dictionary]:
 		{"name": "prefab_relink", "description": "Point a missing/conflicted instance at a new VoxelModel file. Revalidates the whole instance atomically.", "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}, "path": {"type": "string"}, "asset_id": {"type": "string"}}, "required": ["id", "path"]}},
 		{"name": "prefab_reload", "description": "Reload every prefab source from disk and revalidate all instances, then rescan the catalogue. Not undoable and does not dirty the model.", "inputSchema": {"type": "object", "properties": {}}},
 		{"name": "prefab_get_state", "description": "Prefab summary: instance/cell/light counts, soft light budget, over-budget flag, status counts, and a problem list with reasons.", "inputSchema": {"type": "object", "properties": {}}},
-		{"name": "character_get_state", "description": "Character rig state: current preset, slot indices, saved-model slot paths, animation state, attack status.", "inputSchema": {"type": "object", "properties": {}}},
+		{"name": "character_get_state", "description": "Character rig state: current preset, slot indices, saved-model slot paths, reference preview state, attack status.", "inputSchema": {"type": "object", "properties": {}}},
 		{"name": "character_set_preset", "description": "Apply a class preset (0=Warrior, 1=Barbarian, 2=Cultist, 3=Brigand, 4=Villager) to the live rig. Rewrites the four slot indices; slot model paths are untouched.", "inputSchema": {"type": "object", "properties": {"preset": {"type": "integer", "minimum": 0, "maximum": 4}}}},
 		{"name": "character_set_slot", "description": "Set one character part slot (helmet, chest, main_hand, off_hand): either a procedural index, or a saved-model path that overrides it. Empty path clears back to procedural. Saved-model sources containing prefab instances are refused.", "inputSchema": {"type": "object", "properties": {"slot": {"type": "string", "enum": ["helmet", "chest", "main_hand", "off_hand"]}, "index": {"type": "integer"}, "path": {"type": "string"}}, "required": ["slot"]}},
-		{"name": "character_set_anim_state", "description": "Preview a locomotion state on the live rig: idle, walk, or run.", "inputSchema": {"type": "object", "properties": {"state": {"type": "string", "enum": ["idle", "walk", "run"]}}}},
-		{"name": "character_play_attack", "description": "Play one attack swing on the live rig (upper/lower body split keeps the legs moving).", "inputSchema": {"type": "object", "properties": {}}},
+		{"name": "character_set_anim_state", "description": "Preview a reference animation on the live rig (never saved): walk, run, or t-pose to stop and return to the authored rest pose. Voxel editing locks while a preview runs.", "inputSchema": {"type": "object", "properties": {"state": {"type": "string", "enum": ["t-pose", "walk", "run"]}}}},
+		{"name": "character_play_attack", "description": "Preview one attack swing on the live rig (never saved; upper/lower body split keeps the legs moving). Voxel editing locks while the preview runs.", "inputSchema": {"type": "object", "properties": {}}},
 		{"name": "anim_get_state", "description": "Flipbook state: frame count, current frame, per-frame times, repeat mode, playing flag.", "inputSchema": {"type": "object", "properties": {}}},
 		{"name": "anim_add_frame", "description": "Duplicate the current frame (voxels + materials) and select the copy. Refused while playing.", "inputSchema": {"type": "object", "properties": {}}},
 		{"name": "anim_delete_frame", "description": "Delete a frame by index (default: current). Never the last frame.", "inputSchema": {"type": "object", "properties": {"frame": {"type": "integer"}}}},

@@ -62,6 +62,8 @@ var cell_materials: Dictionary = {}
 ## Sparse per-voxel solid/walkable override bits; missing cells inherit from
 ## their material. See VoxelMaterial.make_overrides().
 var cell_overrides: Dictionary = {}
+## Sparse per-voxel occluding group IDs; missing cells are ungrouped (0).
+var cell_occluding_groups: Dictionary = {}
 ## Point lights: integer ID -> {position: Vector3, color: Color,
 ## energy: float, range: float, shadows: bool}. All IDs are positive.
 var lights: Dictionary = {}
@@ -93,8 +95,8 @@ var prefab_light_budget: int = 64
 var prefab_composition: VoxelPrefabComposition = VoxelPrefabComposition.new()
 var character_slots: Dictionary = {}
 var character_style: Dictionary = {}
-## Flipbook frames. `frames[i]` holds grid/materials/overrides dicts; the live
-## `grid`/`cell_materials`/`cell_overrides` always alias `frames[current_frame]`
+## Flipbook frames. `frames[i]` holds grid/materials/overrides/group dicts; the
+## live grid and metadata dictionaries always alias `frames[current_frame]`
 ## (frame 0 is the base cells). Frame add/delete/switch are meta ops (saved,
 ## not undoable); painting a frame is a normal stroke on the live dicts.
 var frames: Array[Dictionary] = []
@@ -186,7 +188,7 @@ func end_stroke() -> void:
 	var net_materials: Dictionary = {}
 	for p: Vector3i in _material_stroke:
 		var record: Array = _material_stroke[p]
-		if record[0] != record[1] or record[2] != record[3]:
+		if record[0] != record[1] or record[2] != record[3] or record[4] != record[5]:
 			net_materials[p] = record
 	_material_stroke = {}
 	var net_lights: Dictionary = {}
@@ -238,7 +240,9 @@ func _apply_material_history(entry: Dictionary, side: int) -> void:
 		var record: Array = entry["materials"][p]
 		var kind_index: int = 0 if side == 0 else 1
 		var bits_index: int = 2 if side == 0 else 3
-		_apply_material_raw(p, int(record[kind_index]), int(record[bits_index]))
+		var group_index: int = 4 if side == 0 else 5
+		var group_id: int = int(record[group_index]) if record.size() > group_index else 0
+		_apply_material_raw(p, int(record[kind_index]), int(record[bits_index]), group_id)
 
 
 func undo() -> bool:
@@ -328,11 +332,12 @@ func _apply_prefab_history(entry: Dictionary, side: int) -> void:
 # --- Editing ---
 
 func place_cells(cells: Array[Vector3i], color: Color,
-		material: int = VoxelMaterial.Kind.DEFAULT, overrides: int = 0) -> void:
+		material: int = VoxelMaterial.Kind.DEFAULT, overrides: int = 0,
+		occluding_group: Variant = null) -> void:
 	begin_stroke()
 	for p in cells:
 		for q in mirrored(p):
-			_write(q, color, material, overrides)
+			_write(q, color, material, overrides, occluding_group)
 	end_stroke()
 	changed.emit()
 
@@ -341,13 +346,15 @@ func place_cells(cells: Array[Vector3i], color: Color,
 ## `cells` maps Vector3i -> Color; mirror applies like place_cells. When
 ## `material`/`overrides` are omitted, existing cells keep their material and
 ## new cells get the default material; when supplied, they apply to every
-## written cell in the batch. Overrides mirror like everything else.
+## written cell in the batch. Overrides and occluding groups mirror like
+## everything else; omitted group metadata is preserved on existing cells.
 ## Returns the number of cells whose value actually changed.
-func write_cells(cells: Dictionary, material: Variant = null, overrides: Variant = null) -> int:
+func write_cells(cells: Dictionary, material: Variant = null, overrides: Variant = null,
+		occluding_group: Variant = null) -> int:
 	var written: int = 0
 	for p: Vector3i in cells:
 		for q in mirrored(p):
-			if _write(q, cells[p], material, overrides):
+			if _write(q, cells[p], material, overrides, occluding_group):
 				written += 1
 	end_stroke()
 	changed.emit()
@@ -363,7 +370,7 @@ func erase_cells(cells: Array[Vector3i]) -> void:
 	changed.emit()
 
 
-## Recolors only voxels that already exist. Material metadata is preserved.
+## Recolors only voxels that already exist. Material and group metadata is preserved.
 func paint_cells(cells: Array[Vector3i], color: Color) -> void:
 	begin_stroke()
 	for p in cells:
@@ -392,6 +399,21 @@ func material_at(p: Vector3i) -> int:
 
 func material_override_at(p: Vector3i) -> int:
 	return int(cell_overrides.get(p, 0))
+
+
+## Applies an occluding group to existing voxels only, as one mirrored stroke.
+func paint_occluding_groups(cells: Array[Vector3i], group_id: int) -> void:
+	begin_stroke()
+	for p in cells:
+		for q in mirrored(p):
+			if grid.has(q):
+				_write(q, grid[q], null, null, group_id)
+	end_stroke()
+	changed.emit()
+
+
+func occluding_group_at(p: Vector3i) -> int:
+	return int(cell_occluding_groups.get(p, 0))
 
 
 func is_solid_cell(p: Vector3i) -> bool:
@@ -734,6 +756,7 @@ func _bind_frame(n: int) -> void:
 	grid = frames[n]["grid"]
 	cell_materials = frames[n]["materials"]
 	cell_overrides = frames[n]["overrides"]
+	cell_occluding_groups = frames[n]["occluding_groups"]
 	_undo_stack.clear()
 	_redo_stack.clear()
 	_stroke = {}
@@ -750,6 +773,7 @@ func add_frame_from_current() -> int:
 		"grid": (grid as Dictionary).duplicate(),
 		"materials": (cell_materials as Dictionary).duplicate(),
 		"overrides": (cell_overrides as Dictionary).duplicate(),
+		"occluding_groups": (cell_occluding_groups as Dictionary).duplicate(),
 	})
 	frame_times.append(0.5)
 	dirty = true
@@ -796,7 +820,8 @@ func set_anim_mode(m: int) -> bool:
 ## Ensures the single-frame store exists and the live dicts alias frame 0.
 func _ensure_frame_store() -> void:
 	if frames.is_empty():
-		frames = [{"grid": grid, "materials": cell_materials, "overrides": cell_overrides}]
+		frames = [{"grid": grid, "materials": cell_materials, "overrides": cell_overrides,
+			"occluding_groups": cell_occluding_groups}]
 		frame_times = [0.5]
 		current_frame = 0
 
@@ -1001,13 +1026,14 @@ func unpack_prefab(id: int) -> Dictionary:
 	var source_grid: Dictionary = inst.source.to_grid()
 	var source_materials: Dictionary = inst.source.to_material_grid()
 	var source_overrides: Dictionary = inst.source.to_override_grid()
+	var source_groups: Dictionary = inst.source.to_occluding_group_grid()
 	begin_stroke()
 	_allow_owned_writes = true
 	for c: Vector3i in source_grid:
 		var p: Vector3i = inst.anchor + VoxelPrefabInstance.cell_offset(
 				c, inst.pivot, inst.yaw_quarters)
 		_write(p, source_grid[c], int(source_materials.get(c, VoxelMaterial.Kind.DEFAULT)),
-			int(source_overrides.get(c, 0)))
+			int(source_overrides.get(c, 0)), int(source_groups.get(c, 0)))
 	_allow_owned_writes = false
 	for l: Dictionary in instance_lights:
 		_add_light_raw(l)
@@ -1301,13 +1327,14 @@ static func _uid_text_for(res: Resource) -> String:
 # --- Lifecycle / IO ---
 
 func reset() -> void:
-	frames = [{"grid": {}, "materials": {}, "overrides": {}}]
+	frames = [{"grid": {}, "materials": {}, "overrides": {}, "occluding_groups": {}}]
 	frame_times = [0.5]
 	anim_mode = 0
 	current_frame = 0
 	grid = frames[0]["grid"]
 	cell_materials = frames[0]["materials"]
 	cell_overrides = frames[0]["overrides"]
+	cell_occluding_groups = frames[0]["occluding_groups"]
 	lights = {}
 	bounds = Vector3i(32, 32, 32)
 	voxel_size = 0.0625
@@ -1371,7 +1398,8 @@ func to_model() -> VoxelModel:
 	var base: Dictionary = frames[0]["grid"] if not frames.is_empty() else grid
 	var base_mats: Dictionary = frames[0]["materials"] if not frames.is_empty() else cell_materials
 	var base_ovs: Dictionary = frames[0]["overrides"] if not frames.is_empty() else cell_overrides
-	m.set_cells(base, base_mats, base_ovs)
+	var base_groups: Dictionary = frames[0]["occluding_groups"] if not frames.is_empty() else cell_occluding_groups
+	m.set_cells(base, base_mats, base_ovs, base_groups)
 	_persist_frames(m)
 	return m
 
@@ -1386,13 +1414,15 @@ func _persist_frames(m: VoxelModel) -> void:
 	m.anim_frame_palettes.clear()
 	m.anim_frame_materials.clear()
 	m.anim_frame_overrides.clear()
+	m.anim_frame_occluding_group_ids.clear()
 	m.anim_frame_times = PackedFloat32Array()
 	m.anim_mode = anim_mode
 	if frames.size() <= 1 and (frame_times.is_empty() or is_equal_approx(float(frame_times[0]), 0.5)):
 		return
 	for i in frames.size():
 		if i > 0:
-			m.append_frame(frames[i]["grid"], frames[i]["materials"], frames[i]["overrides"])
+			m.append_frame(frames[i]["grid"], frames[i]["materials"], frames[i]["overrides"],
+				frames[i]["occluding_groups"])
 		m.anim_frame_times.append(float(frame_times[i]) if i < frame_times.size() else 0.5)
 
 ## Frame `i` duration from the model. Current saves store one duration per
@@ -1420,6 +1450,9 @@ func load_model(m: VoxelModel, source_path: String = "") -> int:
 	var decoded_ovs: Array[Dictionary] = [m.to_override_grid()]
 	for i in range(1, m.frame_count()):
 		decoded_ovs.append(m.frame_override_grid(i))
+	var decoded_groups: Array[Dictionary] = [m.to_occluding_group_grid()]
+	for i in range(1, m.frame_count()):
+		decoded_groups.append(m.frame_occluding_group_grid(i))
 	var nb := Vector3i(
 		clampi(m.bounds.x, MIN_BOUND, MAX_BOUND),
 		clampi(m.bounds.y, MIN_BOUND, MAX_BOUND),
@@ -1456,11 +1489,12 @@ func load_model(m: VoxelModel, source_path: String = "") -> int:
 	# current one (one per frame, index-aligned).
 	frames.clear()
 	frame_times.clear()
-	frames.append({"grid": {}, "materials": {}, "overrides": {}})
+	frames.append({"grid": {}, "materials": {}, "overrides": {}, "occluding_groups": {}})
 	frame_times.append(_load_frame_time(m, 0))
 	grid = frames[0]["grid"]
 	cell_materials = frames[0]["materials"]
 	cell_overrides = frames[0]["overrides"]
+	cell_occluding_groups = frames[0]["occluding_groups"]
 	var dropped: int = 0
 	var src: Dictionary = decoded[0]
 	for p: Vector3i in src:
@@ -1476,6 +1510,10 @@ func load_model(m: VoxelModel, source_path: String = "") -> int:
 	for p: Vector3i in loaded_overrides:
 		if grid.has(p):
 			cell_overrides[p] = int(loaded_overrides[p])
+	var loaded_groups: Dictionary = decoded_groups[0]
+	for p: Vector3i in loaded_groups:
+		if grid.has(p):
+			cell_occluding_groups[p] = int(loaded_groups[p])
 	for i in range(1, m.frame_count()):
 		var src_frame: Dictionary = decoded[i]
 		var kept: Dictionary = {}
@@ -1494,7 +1532,12 @@ func load_model(m: VoxelModel, source_path: String = "") -> int:
 		for p: Vector3i in fog:
 			if kept.has(p):
 				fo[p] = int(fog[p])
-		frames.append({"grid": kept, "materials": fm, "overrides": fo})
+		var fgg: Dictionary = decoded_groups[i]
+		var fg: Dictionary = {}
+		for p: Vector3i in fgg:
+			if kept.has(p):
+				fg[p] = int(fgg[p])
+		frames.append({"grid": kept, "materials": fm, "overrides": fo, "occluding_groups": fg})
 		frame_times.append(_load_frame_time(m, i))
 	anim_mode = clampi(m.anim_mode, 0, 2)
 	current_frame = 0
@@ -1610,7 +1653,8 @@ func packed_lights() -> PackedFloat32Array:
 
 # --- Internals ---
 
-func _write(p: Vector3i, color: Variant, material: Variant = null, overrides: Variant = null) -> bool:
+func _write(p: Vector3i, color: Variant, material: Variant = null, overrides: Variant = null,
+		occluding_group: Variant = null) -> bool:
 	if not in_bounds(p):
 		return false
 	# Linked instance cells are not editable until unpacked. Unpack itself
@@ -1620,18 +1664,23 @@ func _write(p: Vector3i, color: Variant, material: Variant = null, overrides: Va
 	var old_color: Variant = grid.get(p, null)
 	var old_kind: int = int(cell_materials.get(p, VoxelMaterial.Kind.DEFAULT))
 	var old_bits: int = int(cell_overrides.get(p, 0))
+	var old_group: int = int(cell_occluding_groups.get(p, 0))
 	var new_kind: int = old_kind
 	var new_bits: int = old_bits
+	var new_group: int = old_group
 	if color == null:
 		new_kind = VoxelMaterial.Kind.DEFAULT
 		new_bits = 0
+		new_group = 0
 	else:
 		if material != null:
 			new_kind = clampi(int(material), 0, VoxelMaterial.count() - 1)
 		if overrides != null:
 			new_bits = int(overrides) & 0xFF
+		if occluding_group != null:
+			new_group = maxi(int(occluding_group), 0)
 	var color_changed: bool = old_color != color
-	var meta_changed: bool = old_kind != new_kind or old_bits != new_bits
+	var meta_changed: bool = old_kind != new_kind or old_bits != new_bits or old_group != new_group
 	if not color_changed and not meta_changed:
 		return false
 	if color == null:
@@ -1646,6 +1695,10 @@ func _write(p: Vector3i, color: Variant, material: Variant = null, overrides: Va
 		cell_overrides.erase(p)
 	else:
 		cell_overrides[p] = new_bits
+	if new_group == 0:
+		cell_occluding_groups.erase(p)
+	else:
+		cell_occluding_groups[p] = new_group
 	if color_changed:
 		if _stroke.has(p):
 			(_stroke[p] as Array)[1] = color
@@ -1656,8 +1709,9 @@ func _write(p: Vector3i, color: Variant, material: Variant = null, overrides: Va
 			var record: Array = _material_stroke[p]
 			record[1] = new_kind
 			record[3] = new_bits
+			record[5] = new_group
 		else:
-			_material_stroke[p] = [old_kind, new_kind, old_bits, new_bits]
+			_material_stroke[p] = [old_kind, new_kind, old_bits, new_bits, old_group, new_group]
 	last_touched.append(p)
 	return true
 
@@ -1671,7 +1725,7 @@ func _apply_raw(p: Vector3i, color: Variant) -> void:
 		grid[p] = color
 
 
-func _apply_material_raw(p: Vector3i, kind: int, bits: int) -> void:
+func _apply_material_raw(p: Vector3i, kind: int, bits: int, group_id: int = 0) -> void:
 	if not in_bounds(p):
 		return
 	if kind == VoxelMaterial.Kind.DEFAULT:
@@ -1682,6 +1736,10 @@ func _apply_material_raw(p: Vector3i, kind: int, bits: int) -> void:
 		cell_overrides.erase(p)
 	else:
 		cell_overrides[p] = bits
+	if group_id <= 0:
+		cell_occluding_groups.erase(p)
+	else:
+		cell_occluding_groups[p] = group_id
 
 
 func set_character_style(style: Dictionary) -> void:

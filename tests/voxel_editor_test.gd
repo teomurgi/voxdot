@@ -38,6 +38,7 @@ func _run() -> void:
 	_test_panel_layout()
 	_test_fit_bounds()
 	_test_animation_frames()
+	_test_character_preview_lock()
 	_test_sun_shadows()
 	_test_atmosphere()
 	_test_materials_editor()
@@ -261,6 +262,21 @@ func _test_animation_frames() -> void:
 	_ed.doc.reset()
 	_ed._on_frame_switched()
 
+
+func _test_character_preview_lock() -> void:
+	print("character preview locks voxel editing")
+	_ed.doc.reset()
+	_ed._set_tool(VoxelModelEditor.Tool.CHARACTER)
+	_ed._set_character_anim_state(1)
+	_check(_ed._char_preview_active, "walk preview activates the lock")
+	var before: int = _ed.doc.voxel_count()
+	_ed._begin_stroke({"cell": Vector3i(2, 0, 2), "normal": Vector3i.UP, "face_coord": 1.0})
+	_check(not _ed._stroking and _ed.doc.voxel_count() == before, "stroke refused during preview")
+	_ed._set_anim_playing(true)
+	_check(not _ed._anim_playing, "frame playback refused during preview")
+	_ed._set_character_anim_state(0)
+	_check(not _ed._char_preview_active, "t-pose stops the preview")
+	_ed._set_tool(VoxelModelEditor.Tool.PLACE)
 
 func _test_sun_shadows() -> void:
 	print("sun shadows")

@@ -188,23 +188,11 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	if Engine.is_editor_hint() and not animate_in_editor:
 		return  # static rest pose while editing unless preview is enabled
+	_advance_attack(delta)
 	_time += delta
 	_pose_target.clear()
 	_hips_bob_target = Vector3.ZERO
-	if _attack_t >= 0.0:
-		var prev_t: float = _attack_t
-		_attack_t += delta
-		var p := minf(_attack_t / ATTACK_DURATION, 1.0)
-		_pose_attack(p)
-		# Emit the hit window exactly once per swing, when the blade sweeps
-		# through the target space (part-way into the accelerating cleave).
-		var hit_p := ATTACK_WINDUP_END + (ATTACK_CLEAVE_END - ATTACK_WINDUP_END) * ATTACK_HIT_FRACTION
-		if prev_t / ATTACK_DURATION < hit_p and _attack_t / ATTACK_DURATION >= hit_p:
-			attack_hit_window.emit()
-		if _attack_t >= ATTACK_DURATION:
-			_attack_t = -1.0
-			attack_finished.emit()
-	else:
+	if _attack_t < 0.0:
 		match state:
 			AnimState.IDLE:
 				_pose_idle()
@@ -212,7 +200,27 @@ func _process(delta: float) -> void:
 				_pose_locomotion(0.7, 32.0, 0.02, 4.0, BLEND_WALK)
 			AnimState.RUN:
 				_pose_locomotion(0.45, 48.0, 0.04, 12.0, BLEND_RUN)
+	else:
+		_pose_attack(minf(_attack_t / ATTACK_DURATION, 1.0))
 	_apply_pose(delta)
+
+
+## Advances the swing clock without touching poses. The editor preview tick
+## calls this so a headless rig (no _process) still finishes its swing and
+## the preview can settle back to rest on time.
+func _advance_attack(delta: float) -> void:
+	if _attack_t < 0.0:
+		return
+	var prev_t: float = _attack_t
+	_attack_t += delta
+	# Emit the hit window exactly once per swing, when the blade sweeps
+	# through the target space (part-way into the accelerating cleave).
+	var hit_p := ATTACK_WINDUP_END + (ATTACK_CLEAVE_END - ATTACK_WINDUP_END) * ATTACK_HIT_FRACTION
+	if prev_t / ATTACK_DURATION < hit_p and _attack_t / ATTACK_DURATION >= hit_p:
+		attack_hit_window.emit()
+	if _attack_t >= ATTACK_DURATION:
+		_attack_t = -1.0
+		attack_finished.emit()
 
 
 func set_anim_state(s: AnimState) -> void:
@@ -234,6 +242,23 @@ func cancel_attack() -> void:
 	if _attack_t >= 0.0:
 		_attack_t = -1.0
 		attack_finished.emit()
+
+
+## Returns the rig to the authored rest pose (bind pose = T-pose). Voxdot
+## renders, edits and saves characters in this pose; Idle/Walk/Run/Attack
+## are reference previews only and always settle back here when unused.
+func reset_to_rest_pose() -> void:
+	state = AnimState.IDLE
+	_attack_t = -1.0
+	_time = 0.0
+	_pose_target.clear()
+	_pose_current.clear()
+	_hips_bob_target = Vector3.ZERO
+	_hips_bob_current = Vector3.ZERO
+	if skeleton != null:
+		for bone in BONES:
+			skeleton.set_bone_pose(bone_idx[bone], skeleton.get_bone_rest(bone_idx[bone]))
+	attack_finished.emit()
 
 
 func attack_progress() -> float:

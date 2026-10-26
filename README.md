@@ -39,8 +39,8 @@ drag a `.tres` onto the window to open it.
 | `B` | open the prefab catalogue |
 | Prefab gestures | click an instance to select, drag to move, `R` rotate 90°, `Ctrl+D` duplicate, `Delete` delete, `Esc` cancel/clear |
 | Material | pick a palette material; the Material tool repaints existing voxels; Solid/Walkable overrides are per-voxel; Pick samples color + material |
-| Character | pick a class preset, assign saved `.tres` part models per slot (helmet/chest/main_hand/off_hand; empty = procedural), preview Idle/Walk/Run/Attack on the live 13-bone rig |
-| Animation | flipbook frames: duplicate the current frame and paint the next pose; per-frame seconds, Once/Loop/Ping-pong repeat, Play frames (voxels change — painting is refused while playing); rig previews stay in the Character section |
+| Character | pick a class preset, assign saved `.tres` part models per slot (helmet/chest/main_hand/off_hand; empty = procedural). Characters are authored in the rest T-pose; Walk/Run/Attack are unsaved reference previews that lock voxel editing and settle back to T-pose |
+| Animation | flipbook frames: duplicate the current frame and paint the next pose; per-frame seconds, Once/Loop/Ping-pong repeat, Play frames (voxels change — painting is refused while playing or while a character preview runs); rig previews stay in the Character section |
 | Fly through the scene | hold `W` `A` `S` `D` relative to the view; `Space` / `C` for up / down; hold `Shift` to move faster |
 | Screenshot… | View-section button saves a PNG without the HUD, grid, bounds, or editing overlays |
 | `Q` `E` | rotate view 90 degrees |
@@ -76,7 +76,7 @@ prefab control (`prefab_list_assets`/`prefab_refresh_assets`/`prefab_get_asset`/
 result. `prefab_place` uses an explicit `allow_over_budget` flag instead of opening a modal dialog.
 Character rig control (`character_get_state`/`character_set_preset`/`character_set_slot`/
 `character_set_anim_state`/`character_play_attack`) drives the 13-bone preview rig: class presets, saved-model
-slot paths, and Idle/Walk/Run/Attack previews. Flipbook control (`anim_get_state`/`anim_add_frame`/
+slot paths, and Walk/Run/Attack reference previews (never saved; voxel editing locks while one runs and the rig settles back to the authored T-pose). Flipbook control (`anim_get_state`/`anim_add_frame`/
 `anim_delete_frame`/`anim_set_frame`/`anim_set_frame_time`/`anim_set_mode`/`anim_play`/`anim_stop`) edits
 whole-model voxel frames with per-frame timing and once/loop/ping-pong repeat.
 `GET /health` returns a status blob. Example:

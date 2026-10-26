@@ -23,6 +23,7 @@ func _initialize() -> void:
 	_test_lights()
 	_test_atmosphere()
 	_test_materials()
+	_test_occluding_groups()
 	_test_raycast()
 	_test_animation_frames()
 	_test_prefabs()
@@ -366,6 +367,155 @@ func _test_materials() -> void:
 	_check(int((composed["materials"] as Dictionary).get(Vector3i(10, 0, 9),
 		VoxelMaterial.Kind.DEFAULT)) == VoxelMaterial.Kind.WATER,
 		"prefab water metadata survives beside local content")
+
+
+func _test_occluding_groups() -> void:
+	print("occluding groups")
+	var a := Vector3i(0, 0, 0)
+	var b := Vector3i(1, 0, 0)
+	var c := Vector3i(2, 0, 0)
+	var plain := VoxelModel.new()
+	plain.set_cells({a: Color.RED, b: Color.BLUE})
+	_check(plain.occluding_group_ids.is_empty() and plain.to_occluding_group_grid().is_empty(),
+		"default-only model writes no group array")
+	plain.set_cells({a: Color.RED, b: Color.BLUE}, {}, {}, {a: 4, b: 0})
+	_check(plain.occluding_group_ids.size() == 2
+		and plain.to_occluding_group_grid() == {a: 4}, "sparse groups align with sorted cells")
+	plain.occluding_group_ids = PackedInt32Array([4])
+	_check(plain.to_occluding_group_grid().is_empty(), "misaligned legacy group data defaults to ungrouped")
+	var legacy := VoxelModel.from_grid({a: Color.RED})
+	legacy.append_frame({b: Color.BLUE})
+	_check(legacy.anim_frame_occluding_group_ids.size() == 1
+		and legacy.anim_frame_occluding_group_ids[0].is_empty()
+		and legacy.frame_occluding_group_grid(1).is_empty(), "old-style frames default to ungrouped")
+
+	# Local and prefab groups share numeric IDs without sharing render keys.
+	var parent := VoxelModel.new()
+	parent.set_cells({a: Color.RED, b: Color.WHITE, c: Color.GREEN}, {}, {}, {a: 7, c: 8})
+	var source := VoxelModel.new()
+	source.set_cells({a: Color.ORANGE, b: Color.CYAN}, {}, {}, {a: 7})
+	var first := VoxelPrefabInstance.new()
+	first.instance_id = 11
+	first.source = source
+	first.anchor = Vector3i(3, 0, 0)
+	var second := VoxelPrefabInstance.new()
+	second.instance_id = 12
+	second.source = source
+	second.anchor = Vector3i(5, 0, 0)
+	var shadowed := VoxelPrefabInstance.new()
+	shadowed.instance_id = 13
+	shadowed.source = source
+	shadowed.anchor = Vector3i(5, 0, 0)
+	var local_shadowed := VoxelPrefabInstance.new()
+	local_shadowed.instance_id = 14
+	local_shadowed.source = source
+	local_shadowed.anchor = Vector3i.ZERO
+	parent.prefab_instances = [first, second, shadowed, local_shadowed]
+	var composed: Dictionary = parent.build_composed_grid()
+	var render: Dictionary = parent.build_render_grids()
+	var base: Dictionary = render["base"]
+	var groups: Dictionary = render["groups"]
+	_check(groups == parent.build_occluding_groups(), "group-only composition matches render partition")
+	_check(groups.size() == 4 and groups.has(Vector2i(0, 7)) and groups.has(Vector2i(0, 8))
+		and groups.has(Vector2i(11, 7)) and groups.has(Vector2i(12, 7)),
+		"local, instance and group IDs form separate keys")
+	_check(not groups.has(Vector2i(13, 7)) and not groups.has(Vector2i(14, 7)),
+		"local and earlier prefab ownership wins")
+	_check(base.size() == 3 and base.has(b) and base.has(Vector3i(4, 0, 0))
+		and base.has(Vector3i(6, 0, 0)), "base contains every composed ungrouped cell")
+	var partition: Dictionary = base.duplicate()
+	var disjoint: bool = true
+	for key: Vector2i in groups:
+		var group: Dictionary = groups[key]
+		for p: Vector3i in group:
+			disjoint = disjoint and not partition.has(p) and composed.get(p) == group[p]
+			partition[p] = group[p]
+	_check(partition == composed and disjoint,
+		"base and groups are disjoint and cover the composed grid")
+
+	# Local animation uses the requested frame while linked sources stay on
+	# their base frame, matching existing prefab composition.
+	parent.append_frame({a: Color.YELLOW, b: Color.BLACK, c: Color.MAGENTA}, {}, {},
+		{a: 9, b: 10})
+	var animated: Dictionary = parent.build_render_grids(1)
+	var animated_groups: Dictionary = animated["groups"]
+	_check(parent.frame_occluding_group_grid(1) == {a: 9, b: 10}
+		and (animated_groups[Vector2i(0, 9)] as Dictionary).get(a) == Color.YELLOW,
+		"frame metadata follows local frame colors")
+	_check((animated["base"] as Dictionary).size() == 3
+		and (animated["base"] as Dictionary).get(c) == Color.MAGENTA
+		and (animated_groups[Vector2i(11, 7)] as Dictionary).get(Vector3i(3, 0, 0)) == Color.ORANGE,
+		"prefab groups use base colors and local frame zeroes are sparse")
+
+	# Placement, null-metadata writes, painting, erase and history all preserve
+	# the same per-cell ownership rules as material metadata.
+	var edit := VoxelDocument.new()
+	edit.set_mirror(true, false)
+	var edit_p := Vector3i(2, 0, 3)
+	var mirror_p := Vector3i(29, 0, 3)
+	edit.place_cells([edit_p] as Array[Vector3i], Color.RED, VoxelMaterial.Kind.DEFAULT, 0, 4)
+	_check(edit.occluding_group_at(edit_p) == 4 and edit.occluding_group_at(mirror_p) == 4
+		and edit.cell_occluding_groups.size() == 2, "place stores mirrored sparse groups")
+	_check(edit.write_cells({edit_p: Color.BLUE}) == 2
+		and edit.occluding_group_at(edit_p) == 4 and edit.occluding_group_at(mirror_p) == 4,
+		"null-metadata bulk write preserves groups")
+	edit.paint_occluding_groups([edit_p, Vector3i(5, 5, 5)] as Array[Vector3i], 9)
+	_check(edit.occluding_group_at(edit_p) == 9 and edit.occluding_group_at(mirror_p) == 9
+		and not edit.grid.has(Vector3i(5, 5, 5)), "group paint is mirrored and never creates voxels")
+	_check(edit.undo() and edit.occluding_group_at(edit_p) == 4
+		and edit.occluding_group_at(mirror_p) == 4, "mirrored group paint is one undo stroke")
+	_check(edit.redo() and edit.occluding_group_at(edit_p) == 9
+		and edit.occluding_group_at(mirror_p) == 9, "redo restores group paint")
+	edit.paint_cells([edit_p] as Array[Vector3i], Color.GREEN)
+	edit.paint_material([edit_p] as Array[Vector3i], VoxelMaterial.Kind.STONE)
+	_check(edit.occluding_group_at(edit_p) == 9 and edit.occluding_group_at(mirror_p) == 9,
+		"color and material painting preserve groups")
+	edit.erase_cells([edit_p] as Array[Vector3i])
+	_check(not edit.grid.has(edit_p) and edit.occluding_group_at(edit_p) == 0
+		and edit.cell_occluding_groups.is_empty(), "erase clears voxels and group metadata")
+	_check(edit.undo() and edit.occluding_group_at(edit_p) == 9
+		and edit.occluding_group_at(mirror_p) == 9, "undo erase restores groups")
+	_check(edit.redo() and edit.cell_occluding_groups.is_empty(), "redo erase clears groups again")
+	_check(edit.write_cells({edit_p: Color.GREEN}) == 2 and edit.cell_occluding_groups.is_empty(),
+		"new bulk-written cells default to ungrouped")
+	edit.write_cells({edit_p: Color.GREEN}, null, null, 5)
+	_check(edit.occluding_group_at(edit_p) == 5 and edit.occluding_group_at(mirror_p) == 5,
+		"bulk write applies an explicit group without requiring other metadata")
+	var unpack_doc := VoxelDocument.new()
+	var unpack_source := VoxelModel.new()
+	unpack_source.set_cells({a: Color.RED}, {}, {}, {a: 5})
+	var unpack_place: Dictionary = unpack_doc.place_prefab(unpack_source, "groups.tres", "groups",
+		Vector3.ZERO, Vector3i(20, 0, 20), 0)
+	var unpack_cell := Vector3i(20, 0, 20)
+	_check(bool(unpack_place.get("ok", false))
+		and bool(unpack_doc.unpack_prefab(int(unpack_place["instance_id"])).get("ok", false))
+		and unpack_doc.occluding_group_at(unpack_cell) == 5, "unpack preserves source groups")
+	_check(unpack_doc.undo() and unpack_doc.occluding_group_at(unpack_cell) == 0
+		and unpack_doc.redo() and unpack_doc.occluding_group_at(unpack_cell) == 5,
+		"unpack group metadata follows undo and redo")
+
+	# Frame duplication, rebinding and disk round-trips retain independent
+	# metadata for every frame; reset returns to the old empty defaults.
+	var doc := VoxelDocument.new()
+	doc.place_cells([a] as Array[Vector3i], Color.RED, VoxelMaterial.Kind.DEFAULT, 0, 4)
+	doc.add_frame_from_current()
+	doc.paint_occluding_groups([a] as Array[Vector3i], 6)
+	doc.place_cells([b] as Array[Vector3i], Color.BLUE, VoxelMaterial.Kind.DEFAULT, 0, 7)
+	doc.goto_frame(0)
+	_check(doc.occluding_group_at(a) == 4 and doc.to_model().frame_occluding_group_grid(1) == {a: 6, b: 7},
+		"frame copies and edits keep independent groups")
+	var path := "user://voxel_document_occluding_groups.tres"
+	_check(doc.save_file(path) == OK, "save occluding groups")
+	var loaded := VoxelDocument.new()
+	_check(loaded.load_file(path) == OK and loaded.occluding_group_at(a) == 4
+		and loaded.to_model().frame_occluding_group_grid(1) == {a: 6, b: 7},
+		"load restores base and frame groups")
+	loaded.goto_frame(1)
+	_check(loaded.cell_occluding_groups == {a: 6, b: 7}, "loaded live frame aliases group metadata")
+	loaded.reset()
+	_check(loaded.cell_occluding_groups.is_empty() and loaded.occluding_group_at(a) == 0
+		and loaded.frames[0]["occluding_groups"].is_empty(), "reset clears all group metadata")
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
 
 
 func _test_raycast() -> void:
